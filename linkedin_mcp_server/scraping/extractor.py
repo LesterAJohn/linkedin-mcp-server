@@ -1677,6 +1677,21 @@ class LinkedInExtractor:
                 except Exception:
                     logger.debug("Keyboard submit fallback failed", exc_info=True)
             if not sent:
+                # The Send click can also fail because LinkedIn swapped the
+                # invite dialog for the Premium upsell at submit time — the
+                # original primary button is then detached or pointer-event
+                # covered, so the click raises or times out. Check for the
+                # upsell here so we surface the raw note-limit message
+                # instead of dismissing silently and returning
+                # connect_unavailable.
+                if note:
+                    note_limit_message = await self._get_premium_upsell_message()
+                    if note_limit_message is not None:
+                        logger.info(
+                            "Premium upsell modal intercepted invite submit click"
+                        )
+                        await self._dismiss_dialog()
+                        return False, False, note_limit_message
                 await self._dismiss_dialog()
                 return False, False, None
 
