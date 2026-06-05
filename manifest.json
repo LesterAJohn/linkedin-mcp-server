@@ -15,8 +15,6 @@
   "support": "https://github.com/stickerdaniel/linkedin-mcp-server/issues",
   "license": "MIT",
   "keywords": [
-    "linkedin",
-    "scraping",
     "mcp",
     "mcpb",
     "profiles",
