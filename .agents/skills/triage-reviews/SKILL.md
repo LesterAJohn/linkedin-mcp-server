@@ -1,7 +1,6 @@
 ---
 name: triage-reviews
 description: Fetch PR review comments, verify each against real code/docs, fix valid issues, commit and push
-disable-model-invocation: true
 argument-hint: '[PR number]'
 ---
 
