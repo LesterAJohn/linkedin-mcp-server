@@ -861,6 +861,7 @@ class TestDetectConnectionState:
         edit: bool = False,
         labeled_action: bool = False,
         labeled_anchor: bool = False,
+        incoming_row: bool = False,
     ) -> ActionSignals:
         return ActionSignals(
             has_invite_anchor=invite,
@@ -868,6 +869,7 @@ class TestDetectConnectionState:
             has_edit_intro_anchor=edit,
             has_labeled_action_button=labeled_action,
             has_labeled_action_anchor=labeled_anchor,
+            has_incoming_action_row=incoming_row,
         )
 
     def test_self_profile(self):
@@ -920,10 +922,56 @@ class TestDetectConnectionState:
             == "pending"
         )
 
+    def test_incoming_request_via_structural_row(self):
+        # The structural fingerprint alone decides — empty text proves no
+        # label values are consulted (locale-independent).
+        assert (
+            detect_connection_state("", self._signals(incoming_row=True))
+            == "incoming_request"
+        )
+
+    def test_incoming_structural_beats_pending_misclassification(self):
+        # Regression for the sidebar mis-anchor: on incoming profiles the
+        # compose-anchor action-root walk lands on sidebar cards and
+        # produces garbage signals (compose, labeled button, labeled
+        # anchor all True). The structural incoming signal must win over
+        # the pending check those garbage signals would trigger.
+        text = "Eric Langlouis\n\n· 2.\n\nAachen\n\nAnnehmen\nIgnorieren\nMehr"
+        assert (
+            detect_connection_state(
+                text,
+                self._signals(
+                    incoming_row=True,
+                    compose_in_root=True,
+                    labeled_action=True,
+                    labeled_anchor=True,
+                ),
+            )
+            == "incoming_request"
+        )
+
+    def test_connectable_takes_priority_over_incoming_row(self):
+        assert (
+            detect_connection_state("", self._signals(invite=True, incoming_row=True))
+            == "connectable"
+        )
+
+    def test_self_profile_takes_priority_over_incoming_row(self):
+        assert (
+            detect_connection_state("", self._signals(edit=True, incoming_row=True))
+            == "self_profile"
+        )
+
     def test_incoming_request_via_text_fallback_en(self):
         # Locale-table fallback per AGENTS.md — Accept+Ignore (en) appear
         # within the top-card prefix.
         text = "Aklasur Rahman\n\n--\n\nDhaka\n\nAccept\nIgnore\nMore"
+        assert detect_connection_state(text, self._signals()) == "incoming_request"
+
+    def test_incoming_request_via_text_fallback_de(self):
+        # German labels from the locale table; signals all False simulates
+        # a DOM variant the structural fingerprint does not match.
+        text = "BOMMINA SRIRAM\n\n· 2.\n\nHyderabad\n\nAnnehmen\nIgnorieren\nMehr"
         assert detect_connection_state(text, self._signals()) == "incoming_request"
 
     def test_incoming_request_text_outside_top_card_ignored(self):
@@ -990,6 +1038,7 @@ class TestConnectWithPerson:
         edit: bool = False,
         labeled_action: bool = False,
         labeled_anchor: bool = False,
+        incoming_row: bool = False,
     ) -> ActionSignals:
         return ActionSignals(
             has_invite_anchor=invite,
@@ -997,6 +1046,7 @@ class TestConnectWithPerson:
             has_edit_intro_anchor=edit,
             has_labeled_action_button=labeled_action,
             has_labeled_action_anchor=labeled_anchor,
+            has_incoming_action_row=incoming_row,
         )
 
     async def test_connectable_navigates_deeplink_and_verifies(self, mock_page):
@@ -1489,6 +1539,53 @@ class TestConnectWithPerson:
         mock_submit.assert_not_awaited()
 
     async def test_returns_incoming_request_accepted(self, mock_page):
+        """Structural detection + structural accept click, German locale."""
+        extractor = LinkedInExtractor(mock_page)
+        pre = "Eric\n\n· 2.\n\nAachen\n\nAnnehmen\nIgnorieren\nMehr\nInfo\n"
+        post = "Eric\n\n· 1.\n\nAachen\n\nNachricht\nMehr\nInfo\n"
+
+        with (
+            patch.object(
+                extractor,
+                "scrape_person",
+                self._mock_scrape(pre, follow_up_text=post),
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[
+                    self._signals(incoming_row=True),
+                    self._signals(compose=True),
+                ],
+            ),
+            patch.object(
+                extractor,
+                "_click_incoming_accept",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_accept,
+            patch.object(
+                extractor,
+                "_navigate_to_page",
+                new_callable=AsyncMock,
+            ) as mock_nav,
+            patch.object(
+                extractor,
+                "_submit_invite_dialog",
+                new_callable=AsyncMock,
+            ) as mock_submit,
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "accepted"
+        mock_accept.assert_awaited_once()
+        mock_nav.assert_not_awaited()
+        mock_submit.assert_not_awaited()
+
+    async def test_incoming_request_accept_falls_back_to_text_click(self, mock_page):
+        """Detection fired via the text table on a DOM variant without the
+        fingerprinted row; the click falls back to the locale table."""
         extractor = LinkedInExtractor(mock_page)
         pre = "Aklasur\n\n--\n\nDhaka\n\nAccept\nIgnore\nMore\nAbout\n"
         post = "Aklasur\n\n· 1st\n\nDhaka\n\nMessage\nMore\nAbout\n"
@@ -1507,6 +1604,12 @@ class TestConnectWithPerson:
             ),
             patch.object(
                 extractor,
+                "_click_incoming_accept",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor,
                 "click_button_by_text",
                 new_callable=AsyncMock,
                 return_value=True,
@@ -1515,35 +1618,135 @@ class TestConnectWithPerson:
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "accepted"
-        mock_click.assert_awaited_once_with("Accept", scope="main")
+        from linkedin_mcp_server.scraping.connection import INCOMING_REQUEST_LABELS
 
-    async def test_incoming_request_send_failed_when_no_first_degree(self, mock_page):
-        """Accept clicked but profile never transitions to 1st-degree."""
+        accept_labels = {accept for accept, _ in INCOMING_REQUEST_LABELS.values()}
+        assert mock_click.await_args is not None
+        assert mock_click.await_args.args[0] in accept_labels
+
+    async def test_incoming_request_send_failed_when_click_fails(self, mock_page):
+        """Neither the structural nor the text-table click landed."""
         extractor = LinkedInExtractor(mock_page)
-        pre = "Aklasur\n\n--\n\nDhaka\n\nAccept\nIgnore\nMore\nAbout\n"
+        pre = "Eric\n\n· 2.\n\nAachen\n\nAnnehmen\nIgnorieren\nMehr\nInfo\n"
 
         with (
             patch.object(
                 extractor,
                 "scrape_person",
-                self._mock_scrape(pre, follow_up_text=pre),
+                self._mock_scrape(pre),
             ),
             patch.object(
                 extractor,
                 "_read_action_signals",
                 new_callable=AsyncMock,
-                side_effect=[self._signals(), self._signals()],
+                return_value=self._signals(incoming_row=True),
+            ),
+            patch.object(
+                extractor,
+                "_click_incoming_accept",
+                new_callable=AsyncMock,
+                return_value=False,
             ),
             patch.object(
                 extractor,
                 "click_button_by_text",
                 new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor,
+                "_navigate_to_page",
+                new_callable=AsyncMock,
+            ) as mock_nav,
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "send_failed"
+        mock_nav.assert_not_awaited()
+
+    async def test_incoming_request_send_failed_when_no_first_degree(self, mock_page):
+        """Accept clicked but profile never transitions to 1st-degree."""
+        extractor = LinkedInExtractor(mock_page)
+        pre = "Eric\n\n· 2.\n\nAachen\n\nAnnehmen\nIgnorieren\nMehr\nInfo\n"
+
+        with (
+            patch.object(
+                extractor,
+                "scrape_person",
+                AsyncMock(
+                    return_value={
+                        "url": "https://www.linkedin.com/in/testuser/",
+                        "sections": {"main_profile": pre},
+                    }
+                ),
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(incoming_row=True),
+            ),
+            patch.object(
+                extractor,
+                "_click_incoming_accept",
+                new_callable=AsyncMock,
                 return_value=True,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
             ),
         ):
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "send_failed"
+
+    async def test_incoming_request_accepted_on_settle_retry(self, mock_page):
+        """The first post-click read still renders the old top card;
+        the settle retry sees the 1st-degree state and reports accepted."""
+        extractor = LinkedInExtractor(mock_page)
+        pre = "Eric\n\n· 2.\n\nAachen\n\nAnnehmen\nIgnorieren\nMehr\nInfo\n"
+        post = "Eric\n\n· 1.\n\nAachen\n\nNachricht\nMehr\nInfo\n"
+        page = {
+            "url": "https://www.linkedin.com/in/testuser/",
+            "sections": {"main_profile": pre},
+        }
+        page_post = {
+            "url": "https://www.linkedin.com/in/testuser/",
+            "sections": {"main_profile": post},
+        }
+
+        with (
+            patch.object(
+                extractor,
+                "scrape_person",
+                AsyncMock(side_effect=[page, page, page_post]),
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[
+                    self._signals(incoming_row=True),
+                    self._signals(incoming_row=True),
+                    self._signals(compose=True),
+                ],
+            ),
+            patch.object(
+                extractor,
+                "_click_incoming_accept",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "accepted"
+        mock_sleep.assert_awaited_once()
 
     async def test_returns_unavailable_when_no_signals_and_text(self, mock_page):
         """No structural signals, no actionable text → connect_unavailable."""

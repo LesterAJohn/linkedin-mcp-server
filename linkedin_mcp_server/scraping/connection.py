@@ -13,11 +13,12 @@ Per ``AGENTS.md`` Scraping Rules, classification logic relies on URL
 patterns and attribute *presence* — never on the values of locale-dependent
 text labels like "Connect", "Follow", or "1st".
 
-The single text-based fallback that remains is incoming-request detection
-(Accept/Ignore present in the top-card text). LinkedIn does not expose a
-distinctive URL or attribute for this state. Per the same rules, that
-fallback lives behind an explicit per-locale label table that is trivial
-to extend.
+Incoming-request detection is primarily structural: the Accept/Ignore
+action row is fingerprinted by attribute presence and element counts
+(see :attr:`ActionSignals.has_incoming_action_row`). LinkedIn exposes no
+URL for this state, so a text-based fallback (Accept/Ignore present in
+the top-card text) is retained behind an explicit per-locale label table
+for DOM variants the fingerprint does not cover.
 """
 
 from __future__ import annotations
@@ -38,12 +39,15 @@ ConnectionState = Literal[
 
 
 # Per AGENTS.md Scraping Rules: text-only signals must live behind an
-# explicit per-locale table. This table covers incoming-request detection
-# only — the one state without a structural URL/attribute signal we have
-# verified against the live DOM. Extend with additional ("xx", (a, b))
-# entries once the labels are confirmed against a real profile.
+# explicit per-locale table. This table is the incoming-request fallback
+# for DOM variants the structural action-row fingerprint does not match.
+# Extend with additional ("xx", (a, b)) entries once the labels are
+# confirmed against a real profile.
 INCOMING_REQUEST_LABELS: dict[str, tuple[str, str]] = {
     "en": ("Accept", "Ignore"),
+    # Verified live 2026-06-11 against two German-locale incoming-request
+    # profiles.
+    "de": ("Annehmen", "Ignorieren"),
 }
 
 
@@ -99,6 +103,19 @@ class ActionSignals:
     locale-dependent and not read; presence-on-an-``<a>`` is the
     locale-independent Pending signal."""
 
+    has_incoming_action_row: bool
+    """The top-card action row matches the incoming-request fingerprint:
+    exactly three ``<button>``s in the smallest multi-button container
+    around a ``button[aria-expanded]`` — two with ``aria-label``
+    (Accept, Ignore) preceding one unlabeled expander (More) — and the
+    container holds no compose anchor, no invite anchor, and no labeled
+    ``<a>``. All checks are attribute presence and structural counts per
+    the AGENTS.md Scraping Rules; no label values are read. Verified
+    live 2026-06-11 against two German-locale incoming-request profiles.
+    Computed independently of the compose-anchor action-root walk, which
+    finds no top-card root on incoming profiles (they have no Message
+    button) and would otherwise mis-anchor on sidebar cards."""
+
 
 def detect_connection_state(
     profile_text: str,
@@ -110,27 +127,34 @@ def detect_connection_state(
 
     1. ``self_profile`` — edit-intro anchor (URL).
     2. ``connectable`` — vanityName invite anchor (URL).
-    3. ``pending`` — labeled action ``<a>`` in the action root (the
+    3. ``incoming_request`` — structural action-row fingerprint. Must
+       precede the pending check: incoming profiles have no Message
+       button in the top card, so the compose-anchor action-root walk
+       mis-anchors on sidebar cards whose labeled anchors would
+       otherwise satisfy the pending signal.
+    4. ``pending`` — labeled action ``<a>`` in the action root (the
        Pending control LinkedIn renders for invitations awaiting
        response).
-    4. ``incoming_request`` — locale-table text fallback. The one
-       AGENTS.md-sanctioned text-based signal; extend
+    5. ``incoming_request`` — locale-table text fallback for DOM
+       variants the fingerprint does not match; extend
        :data:`INCOMING_REQUEST_LABELS` to add locales.
-    5. ``already_connected`` — compose anchor present in action root and
+    6. ``already_connected`` — compose anchor present in action root and
        no labeled action button. (1st-degree connections render Message
        as the primary action; there is no Follow/Connect button.)
-    6. ``follow_only`` — compose anchor present in action root and at
+    7. ``follow_only`` — compose anchor present in action root and at
        least one labeled action ``<button>`` (Follow / Save in Sales
        Navigator), but no invite anchor anywhere. The
        ``connect_with_person`` write-gate prevents the deeplink from
        firing on this state.
-    7. ``unavailable`` — fallthrough (e.g. profile pages where the
+    8. ``unavailable`` — fallthrough (e.g. profile pages where the
        action area could not be located at all).
     """
     if signals.has_edit_intro_anchor:
         return "self_profile"
     if signals.has_invite_anchor:
         return "connectable"
+    if signals.has_incoming_action_row:
+        return "incoming_request"
     if signals.has_labeled_action_anchor:
         return "pending"
     if _has_incoming_request_text(profile_text):
