@@ -18,7 +18,9 @@ from linkedin_mcp_server.bootstrap import (
     browser_setup_ready,
     browsers_path,
     configure_browser_environment,
+    ensure_browser_installed,
     ensure_tool_ready_or_raise,
+    full_chromium_ready,
     get_bootstrap_state,
     get_runtime_policy,
     initialize_bootstrap,
@@ -28,6 +30,7 @@ from linkedin_mcp_server.bootstrap import (
     reset_bootstrap_for_testing,
     RuntimePolicy,
     SetupState,
+    shell_ready,
     start_background_browser_setup_if_needed,
 )
 from linkedin_mcp_server.config.schema import AppConfig
@@ -59,6 +62,8 @@ def _patch_inline_wait(monkeypatch, seconds: float, *, auto_import=False) -> Non
         browser=SimpleNamespace(
             login_inline_wait_seconds=seconds,
             auto_import_from_browser=auto_import,
+            chrome_path=None,
+            headless=True,
         ),
         server=SimpleNamespace(transport="stdio", host="127.0.0.1"),
         is_interactive=False,
@@ -76,6 +81,7 @@ class TestBootstrap:
         async def fake_setup() -> None:
             return None
 
+        _patch_inline_wait(monkeypatch, 0)
         monkeypatch.setattr(
             "linkedin_mcp_server.bootstrap.browser_setup_ready", lambda: False
         )
@@ -91,7 +97,8 @@ class TestBootstrap:
         assert state.setup_task is not None
         await state.setup_task
 
-    async def test_setup_in_progress_raises(self):
+    async def test_setup_in_progress_raises(self, monkeypatch):
+        _patch_inline_wait(monkeypatch, 0)
         initialize_bootstrap("managed")
         state = get_bootstrap_state()
         state.setup_state = SetupState.RUNNING
@@ -106,6 +113,7 @@ class TestBootstrap:
                 "No valid LinkedIn session was found. A login browser window has been opened. Sign in with your LinkedIn credentials there, then retry this tool."
             )
 
+        _patch_inline_wait(monkeypatch, 0)
         monkeypatch.setattr(
             "linkedin_mcp_server.bootstrap.browser_setup_ready", lambda: True
         )
@@ -298,16 +306,28 @@ def _materialize_install(browsers_dir: Path, dirs: list[str]) -> None:
 
 def _write_metadata(path: Path, browsers_dir: Path, **overrides) -> None:
     payload = {
-        "version": 2,
+        "version": 3,
         "runtime_id": "test-runtime",
         "installed_at": "2026-01-01T00:00:00Z",
         "browsers_path": str(browsers_dir),
         "browser_name": "chromium",
         "installer_name": "patchright",
         "patchright_version": _PATCHRIGHT_VERSION,
+        "installed_targets": {
+            "chromium-": True,
+            "chromium_headless_shell-": True,
+        },
         **overrides,
     }
     path.write_text(json.dumps(payload))
+
+
+def _set_headless(monkeypatch, headless: bool) -> None:
+    """Point bootstrap.get_config() at a config with the given headless mode."""
+    config = SimpleNamespace(
+        browser=SimpleNamespace(headless=headless, chrome_path=None),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
 
 
 def _patch_targets_and_version(
@@ -323,6 +343,16 @@ def _patch_targets_and_version(
 
 
 class TestBrowserSetupReady:
+    """Shared metadata-shape coverage, exercised through browser_setup_ready().
+
+    The default test config is headless, so browser_setup_ready() resolves to
+    shell_ready(); the mode-aware split is covered separately below.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _headless_config(self, monkeypatch):
+        _set_headless(monkeypatch, True)
+
     def test_false_when_metadata_absent(self, isolate_profile_dir, monkeypatch):
         _patch_targets_and_version(monkeypatch)
         assert browser_setup_ready() is False
@@ -384,6 +414,14 @@ class TestBrowserSetupReady:
         _write_metadata(install_metadata_path(), bdir, version=1)
         assert browser_setup_ready() is False
 
+    def test_false_on_v2_metadata(self, isolate_profile_dir, monkeypatch):
+        """A pre-shell-first v2 blob reads as not-ready under v3 (forced reinstall)."""
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217", "chromium_headless_shell-1217"])
+        _write_metadata(install_metadata_path(), bdir, version=2)
+        assert browser_setup_ready() is False
+
     def test_false_on_corrupt_metadata(self, isolate_profile_dir, monkeypatch):
         _patch_targets_and_version(monkeypatch)
         bdir = browsers_path()
@@ -441,6 +479,387 @@ class TestBrowserSetupReady:
         (bdir / "chromium-1217" / "DEPENDENCIES_VALIDATED").unlink()
         _write_metadata(install_metadata_path(), bdir)
         assert browser_setup_ready() is True
+
+
+class TestShellAndFullReady:
+    """The split predicates: shell-only vs full-chromium readiness."""
+
+    @pytest.fixture(autouse=True)
+    def _headless_config(self, monkeypatch):
+        _set_headless(monkeypatch, True)
+
+    def test_shell_ready_true_full_false_with_only_shell(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """Only the headless shell present: shell_ready True, full_chromium_ready False."""
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium_headless_shell-1217"])
+        _write_metadata(install_metadata_path(), bdir)
+        assert shell_ready() is True
+        assert full_chromium_ready() is False
+
+    def test_both_ready_with_complete_install(self, isolate_profile_dir, monkeypatch):
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217", "chromium_headless_shell-1217"])
+        _write_metadata(install_metadata_path(), bdir)
+        assert shell_ready() is True
+        assert full_chromium_ready() is True
+
+    def test_shell_false_when_only_full_present(self, isolate_profile_dir, monkeypatch):
+        """Full chromium without the shell: shell_ready False (the shell is the gate)."""
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217"])
+        _write_metadata(install_metadata_path(), bdir)
+        assert shell_ready() is False
+        assert full_chromium_ready() is False
+
+    def test_both_false_when_metadata_shape_bad(self, isolate_profile_dir, monkeypatch):
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217", "chromium_headless_shell-1217"])
+        _write_metadata(install_metadata_path(), bdir, version=2)
+        assert shell_ready() is False
+        assert full_chromium_ready() is False
+
+
+class TestModeAwareGate:
+    """ensure_tool_ready_or_raise gates on the binary the configured mode uses."""
+
+    async def test_headless_mode_releases_on_shell_only(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """Headless server: only the shell present -> gate releases to the auth path."""
+        _patch_targets_and_version(monkeypatch)
+        _set_headless(monkeypatch, True)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium_headless_shell-1217"])
+        _write_metadata(install_metadata_path(), bdir)
+        configure_browser_environment()
+
+        # Past the setup gate, auth gating decides; force auth ready so the call
+        # returns normally (no setup-in-progress raise).
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap._auth_ready", lambda: True)
+
+        initialize_bootstrap("managed")
+
+        result = await ensure_tool_ready_or_raise("get_person_profile")
+        assert result is None
+
+    async def test_headed_mode_blocks_until_full_chromium(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """--no-headless server: shell-only is not enough -> setup-in-progress raise."""
+        _patch_targets_and_version(monkeypatch)
+        _set_headless(monkeypatch, False)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium_headless_shell-1217"])
+        _write_metadata(install_metadata_path(), bdir)
+        configure_browser_environment()
+
+        async def fake_setup() -> None:
+            return None
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_browser_setup", fake_setup
+        )
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap._auth_ready", lambda: True)
+
+        initialize_bootstrap("managed")
+
+        with pytest.raises(BrowserSetupInProgressError):
+            await ensure_tool_ready_or_raise("get_person_profile")
+
+    async def test_headed_mode_releases_on_full_chromium(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """--no-headless server with full chromium present: gate releases."""
+        _patch_targets_and_version(monkeypatch)
+        _set_headless(monkeypatch, False)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217", "chromium_headless_shell-1217"])
+        _write_metadata(install_metadata_path(), bdir)
+        configure_browser_environment()
+
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap._auth_ready", lambda: True)
+
+        initialize_bootstrap("managed")
+
+        result = await ensure_tool_ready_or_raise("get_person_profile")
+        assert result is None
+
+
+class TestChromePathShortCircuit:
+    """A custom chrome_path skips the managed install in both modes."""
+
+    def _config(self, *, headless: bool, chrome_path: str):
+        return SimpleNamespace(
+            browser=SimpleNamespace(
+                headless=headless,
+                chrome_path=chrome_path,
+                login_inline_wait_seconds=0,
+                auto_import_from_browser=False,
+            ),
+            server=SimpleNamespace(transport="stdio", host="127.0.0.1"),
+            is_interactive=False,
+        )
+
+    @pytest.mark.parametrize("headless", [True, False])
+    async def test_gate_short_circuits_to_ready(
+        self, isolate_profile_dir, monkeypatch, headless
+    ):
+        config = self._config(headless=headless, chrome_path="/usr/bin/chromium")
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap._auth_ready", lambda: True)
+
+        # No metadata, no install on disk: a managed gate would block, but the
+        # custom executable must short-circuit straight to ready.
+        called = {"value": False}
+
+        async def fail_setup() -> None:
+            called["value"] = True
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_browser_setup", fail_setup
+        )
+
+        initialize_bootstrap("managed")
+
+        result = await ensure_tool_ready_or_raise("get_person_profile")
+        assert result is None
+        assert called["value"] is False
+        assert get_bootstrap_state().setup_state is SetupState.READY
+
+    @pytest.mark.parametrize("headless", [True, False])
+    async def test_background_setup_skipped(
+        self, isolate_profile_dir, monkeypatch, headless
+    ):
+        config = self._config(headless=headless, chrome_path="/usr/bin/chromium")
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+
+        initialize_bootstrap("managed")
+        await start_background_browser_setup_if_needed()
+
+        state = get_bootstrap_state()
+        assert state.setup_state is SetupState.READY
+        assert state.setup_task is None
+
+
+class TestTwoStageInstall:
+    """_run_browser_setup runs --only-shell then --no-shell and writes v3 metadata."""
+
+    def _stub_install(self, monkeypatch):
+        """Replace the patchright subprocess with a recorder of the install flags."""
+        calls: list[str] = []
+
+        async def fake_install(extra_arg: str) -> None:
+            calls.append(extra_arg)
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_patchright_install", fake_install
+        )
+        return calls
+
+    async def test_headless_lazy_stops_after_shell(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """Plain headless mode installs only the shell; metadata records shell-only."""
+        _patch_targets_and_version(monkeypatch)
+        config = SimpleNamespace(
+            browser=SimpleNamespace(headless=True, eager_full_chromium=False)
+        )
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+        calls = self._stub_install(monkeypatch)
+
+        from linkedin_mcp_server.bootstrap import _run_browser_setup
+
+        await _run_browser_setup()
+
+        assert calls == ["--only-shell"]
+        payload = json.loads(install_metadata_path().read_text())
+        assert payload["version"] == 3
+        assert payload["installed_targets"] == {
+            "chromium-": False,
+            "chromium_headless_shell-": True,
+        }
+
+    async def test_headed_installs_both_in_order(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """Headed mode installs shell then full chromium; metadata records both."""
+        _patch_targets_and_version(monkeypatch)
+        config = SimpleNamespace(
+            browser=SimpleNamespace(headless=False, eager_full_chromium=False)
+        )
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+        calls = self._stub_install(monkeypatch)
+
+        from linkedin_mcp_server.bootstrap import _run_browser_setup
+
+        await _run_browser_setup()
+
+        assert calls == ["--only-shell", "--no-shell"]
+        payload = json.loads(install_metadata_path().read_text())
+        assert payload["installed_targets"] == {
+            "chromium-": True,
+            "chromium_headless_shell-": True,
+        }
+
+    async def test_eager_knob_installs_both_in_headless(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """eager_full_chromium runs the --no-shell stage even in headless mode."""
+        _patch_targets_and_version(monkeypatch)
+        config = SimpleNamespace(
+            browser=SimpleNamespace(headless=True, eager_full_chromium=True)
+        )
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+        calls = self._stub_install(monkeypatch)
+
+        from linkedin_mcp_server.bootstrap import _run_browser_setup
+
+        await _run_browser_setup()
+
+        assert calls == ["--only-shell", "--no-shell"]
+
+    async def test_single_setup_task_runs_both_stages(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """Both install stages run inside the one background setup task."""
+        _patch_targets_and_version(monkeypatch)
+        config = SimpleNamespace(
+            browser=SimpleNamespace(
+                headless=False, eager_full_chromium=False, chrome_path=None
+            )
+        )
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.browser_setup_ready", lambda: False
+        )
+        calls = self._stub_install(monkeypatch)
+
+        initialize_bootstrap("managed")
+        await start_background_browser_setup_if_needed()
+
+        state = get_bootstrap_state()
+        assert state.setup_task is not None
+        await state.setup_task
+        assert calls == ["--only-shell", "--no-shell"]
+
+
+class TestEnsureBrowserInstalledTarget:
+    """ensure_browser_installed requests the shell or full chromium per mode."""
+
+    def _stub(self, monkeypatch):
+        shell_calls = {"value": 0}
+        full_calls = {"value": 0}
+
+        async def fake_shell() -> None:
+            shell_calls["value"] += 1
+
+        async def fake_full() -> None:
+            full_calls["value"] += 1
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_install_shell_only", fake_shell
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._ensure_full_chromium_installed", fake_full
+        )
+        return shell_calls, full_calls
+
+    def test_shell_target_installs_shell_only(self, isolate_profile_dir, monkeypatch):
+        _patch_targets_and_version(monkeypatch)
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.shell_ready", lambda: False)
+        shell_calls, full_calls = self._stub(monkeypatch)
+
+        ensure_browser_installed(full=False)
+
+        assert shell_calls["value"] == 1
+        assert full_calls["value"] == 0
+
+    def test_full_target_installs_full(self, isolate_profile_dir, monkeypatch):
+        _patch_targets_and_version(monkeypatch)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.full_chromium_ready", lambda: False
+        )
+        shell_calls, full_calls = self._stub(monkeypatch)
+
+        ensure_browser_installed(full=True)
+
+        assert shell_calls["value"] == 0
+        assert full_calls["value"] == 1
+
+    def test_shell_target_noop_when_shell_present(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.shell_ready", lambda: True)
+        shell_calls, full_calls = self._stub(monkeypatch)
+
+        ensure_browser_installed(full=False)
+
+        assert shell_calls["value"] == 0
+        assert full_calls["value"] == 0
+
+    def test_full_target_noop_when_full_present(self, isolate_profile_dir, monkeypatch):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.full_chromium_ready", lambda: True
+        )
+        shell_calls, full_calls = self._stub(monkeypatch)
+
+        ensure_browser_installed(full=True)
+
+        assert shell_calls["value"] == 0
+        assert full_calls["value"] == 0
+
+
+class TestLazyFullChromiumTrigger:
+    """The headed manual-login fallback installs full chromium before launching."""
+
+    def _stub(self, monkeypatch, *, custom_chrome: bool):
+        order: list[str] = []
+
+        async def fake_full() -> None:
+            order.append("full")
+
+        async def fake_login(_profile_dir) -> bool:
+            order.append("login")
+            return True
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._uses_custom_chrome", lambda: custom_chrome
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._ensure_full_chromium_installed", fake_full
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.interactive_login", fake_login
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.get_profile_dir",
+            lambda: Path("/tmp/profile"),
+        )
+        return order
+
+    async def test_installs_full_chromium_before_headed_launch(self, monkeypatch):
+        order = self._stub(monkeypatch, custom_chrome=False)
+
+        from linkedin_mcp_server.bootstrap import _run_login_flow
+
+        await _run_login_flow()
+
+        assert order == ["full", "login"]
+
+    async def test_skips_full_chromium_for_custom_chrome(self, monkeypatch):
+        order = self._stub(monkeypatch, custom_chrome=True)
+
+        from linkedin_mcp_server.bootstrap import _run_login_flow
+
+        await _run_login_flow()
+
+        assert order == ["login"]
 
 
 class TestPatchrightInstallTargets:
@@ -597,6 +1016,7 @@ class TestEnsureToolReadyInvalidatesStaleReady:
         async def fake_setup() -> None:
             return None
 
+        _patch_inline_wait(monkeypatch, 0)
         # Disk says not-ready, in-memory state cached READY.
         monkeypatch.setattr(
             "linkedin_mcp_server.bootstrap.browser_setup_ready", lambda: False

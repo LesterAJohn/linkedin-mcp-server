@@ -419,9 +419,14 @@ def test_main_dispatches_import_before_login(monkeypatch, tmp_path):
     )
 
     calls: list[str] = []
+
+    def fake_ensure(*, full: bool = False) -> None:
+        # Both --login and --import-from-browser are set; import dispatches
+        # first, so the install requests full chromium for the headed login.
+        calls.append(f"ensure(full={full})")
+
     monkeypatch.setattr(
-        "linkedin_mcp_server.cli_main.ensure_browser_installed",
-        lambda: calls.append("ensure"),
+        "linkedin_mcp_server.cli_main.ensure_browser_installed", fake_ensure
     )
 
     def fake_import():
@@ -442,7 +447,8 @@ def test_main_dispatches_import_before_login(monkeypatch, tmp_path):
 
     assert exit_info.value.code == 0
     # Browser install gate ran for import, import dispatched, login never reached.
-    assert calls == ["ensure", "import"]
+    # --login is also set, so the install requests full chromium.
+    assert calls == ["ensure(full=True)", "import"]
 
 
 def test_clear_profile_and_exit_clears_all_auth_state(

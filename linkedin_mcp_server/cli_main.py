@@ -343,13 +343,15 @@ def main() -> None:
             clear_profile_and_exit()
 
         # Ensure browser is installed for CLI modes that launch it.
-        # Normal server startup uses async background setup instead.
+        # Normal server startup uses async background setup instead. --login is
+        # headed and needs full chromium; --status and --import-from-browser run
+        # headless and need only the shell.
         if (
             config.server.login
             or config.server.status
             or config.server.import_from_browser
         ):
-            ensure_browser_installed()
+            ensure_browser_installed(full=config.server.login)
 
         # Handle --import-from-browser flag
         if config.server.import_from_browser:

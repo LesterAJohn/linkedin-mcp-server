@@ -53,6 +53,12 @@ class BrowserConfig:
     # user's keychain and degrades to manual login, and no cookie crosses the
     # network.
     auto_import_from_browser: bool | None = None
+    # Install full Chrome for Testing up front during background setup instead
+    # of lazily on the first headed login. Off by default: the headless scrape +
+    # auto-import path needs only the headless shell, so a headless-only operator
+    # never downloads the larger full-chromium binary unless interactive login is
+    # actually triggered. Set True to pre-warm the headed login fallback.
+    eager_full_chromium: bool = False
 
     def validate(self) -> None:
         """Validate browser configuration values."""

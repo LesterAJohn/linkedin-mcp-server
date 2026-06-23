@@ -18,6 +18,7 @@ class TestBrowserConfig:
         assert config.login_timeout_seconds == 1800.0
         assert config.login_inline_wait_seconds == 25.0
         assert config.auto_import_from_browser is None
+        assert config.eager_full_chromium is False
 
     def test_validate_passes(self):
         BrowserConfig().validate()  # No error
@@ -400,6 +401,37 @@ class TestLoaders:
 
         config = load_config()
         assert config.browser.auto_import_from_browser is None
+
+    def test_eager_full_chromium_default_is_false(self):
+        assert BrowserConfig().eager_full_chromium is False
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [("false", False), ("true", True), ("0", False), ("1", True)],
+    )
+    def test_load_from_env_eager_full_chromium(self, monkeypatch, value, expected):
+        monkeypatch.setenv("EAGER_FULL_CHROMIUM", value)
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.eager_full_chromium is expected
+
+    def test_load_from_args_eager_full_chromium(self, monkeypatch):
+        monkeypatch.setattr(
+            "sys.argv", ["linkedin-mcp-server", "--eager-full-chromium"]
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(AppConfig())
+        assert config.browser.eager_full_chromium is True
+
+    def test_eager_full_chromium_absent_keeps_default(self, monkeypatch):
+        monkeypatch.delenv("EAGER_FULL_CHROMIUM", raising=False)
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        from linkedin_mcp_server.config import load_config
+
+        config = load_config()
+        assert config.browser.eager_full_chromium is False
 
     def test_load_from_env_port(self, monkeypatch):
         monkeypatch.setenv("PORT", "9000")
