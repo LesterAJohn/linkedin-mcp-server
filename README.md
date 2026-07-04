@@ -99,7 +99,7 @@ the repository and keep the command name explicit:
 ```bash
 uvx --from git+https://github.com/LesterAJohn/linkedin-mcp-server.git \
   mcp-server-linkedin \
-  --user-id "LesterAJohn@gmail.com" \
+  --user-id "{useremail}" \
   --user-data-dir "/opt/fortisai/linkedin/users/lesterajohn-gmail-com/profile" \
   --login-timeout 1800 \
   --login
@@ -128,7 +128,7 @@ service supervisor:
       ],
       "env": {
         "UV_HTTP_TIMEOUT": "300",
-        "USER_ID": "LesterAJohn@gmail.com",
+        "USER_ID": "{useremail}",
         "USER_DATA_DIR": "/opt/fortisai/linkedin/users/lesterajohn-gmail-com/profile"
       }
     }
@@ -326,7 +326,7 @@ current PyPI package, use:
 ```bash
 uvx --from git+https://github.com/LesterAJohn/linkedin-mcp-server.git \
   mcp-server-linkedin \
-  --user-id "LesterAJohn@gmail.com" \
+  --user-id "{useremail}" \
   --user-data-dir "$HOME/.linkedin-mcp/profile" \
   --login
 ```
