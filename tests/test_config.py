@@ -63,6 +63,7 @@ class TestServerConfig:
         assert config.transport == "stdio"
         assert config.port == 8000
         assert config.tool_timeout_seconds == 180.0
+        assert config.user_id is None
 
     def test_validate_passes(self):
         ServerConfig().validate()  # No error
@@ -460,6 +461,42 @@ class TestLoaders:
 
         config = load_from_env(AppConfig())
         assert config.server.port == 9000
+
+    def test_load_from_env_user_id(self, monkeypatch):
+        monkeypatch.setenv("USER_ID", "acct-123")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.server.user_id == "acct-123"
+
+    def test_load_from_env_blank_user_id_becomes_none(self, monkeypatch):
+        monkeypatch.setenv("USER_ID", "   ")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.server.user_id is None
+
+    def test_load_from_args_user_id(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--user-id", "u-42"])
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(AppConfig())
+        assert config.server.user_id == "u-42"
+
+    def test_load_from_args_blank_user_id_becomes_none(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--user-id", "   "])
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(AppConfig())
+        assert config.server.user_id is None
+
+    def test_args_user_id_overrides_env(self, monkeypatch):
+        monkeypatch.setenv("USER_ID", "env-user")
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--user-id", "arg-user"])
+        from linkedin_mcp_server.config import load_config
+
+        config = load_config()
+        assert config.server.user_id == "arg-user"
 
     def test_load_from_env_slow_mo(self, monkeypatch):
         monkeypatch.setenv("SLOW_MO", "100")

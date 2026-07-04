@@ -122,6 +122,7 @@ class ServerConfig:
     transport: Literal["stdio", "streamable-http"] = "stdio"
     transport_explicitly_set: bool = False
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "WARNING"
+    user_id: str | None = None
     login: bool = False
     status: bool = False  # Check session validity and exit
     logout: bool = False

@@ -69,6 +69,7 @@ class EnvironmentKeys:
     HOST = "HOST"
     PORT = "PORT"
     HTTP_PATH = "HTTP_PATH"
+    USER_ID = "USER_ID"
     SLOW_MO = "SLOW_MO"
     VIEWPORT = "VIEWPORT"
     CHROME_PATH = "CHROME_PATH"
@@ -204,6 +205,11 @@ def load_from_env(config: AppConfig) -> AppConfig:
     if path_env := os.environ.get(EnvironmentKeys.HTTP_PATH):
         config.server.path = path_env
 
+    # Optional logical user identity for multi-profile routing.
+    if user_id_env := os.environ.get(EnvironmentKeys.USER_ID):
+        user_id_value = user_id_env.strip()
+        config.server.user_id = user_id_value or None
+
     # Slow motion delay for debugging (validated in BrowserConfig.validate())
     if slow_mo_env := os.environ.get(EnvironmentKeys.SLOW_MO):
         try:
@@ -298,6 +304,13 @@ def load_from_args(config: AppConfig) -> AppConfig:
         type=str,
         default=None,
         help="HTTP server path (default: /mcp)",
+    )
+
+    parser.add_argument(
+        "--user-id",
+        type=str,
+        default=None,
+        help="Optional logical user identity for profile/session selection",
     )
 
     # Browser configuration
@@ -476,6 +489,10 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.path:
         config.server.path = args.path
+
+    if args.user_id is not None:
+        value = args.user_id.strip()
+        config.server.user_id = value or None
 
     # Browser configuration
     if args.slow_mo:
