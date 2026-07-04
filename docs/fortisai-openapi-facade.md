@@ -40,14 +40,14 @@ the OpenWebUI user identity in a header or body field.
 Recommended header:
 
 ```text
-x-openwebui-user-email: LesterAJohn@gmail.com
+x-openwebui-user-email: {useremail}
 ```
 
 Equivalent body field:
 
 ```json
 {
-  "openwebui_user_id": "LesterAJohn@gmail.com"
+  "openwebui_user_id": "{useremail}"
 }
 ```
 
@@ -77,7 +77,7 @@ x-user-id
 ```
 
 If no user identity is supplied, the facade uses the default upstream container.
-With `LesterAJohn@gmail.com`, FortisAI resolves the user segment to:
+With `{useremail}`, FortisAI resolves the user segment to:
 
 ```text
 lesterajohn-gmail-com-cd1d71bcd4
@@ -118,7 +118,7 @@ Set a base URL and user once:
 
 ```bash
 BASE_URL="http://127.0.0.1:8102"
-USER_EMAIL="LesterAJohn@gmail.com"
+USER_EMAIL="{useremail}"
 ```
 
 Connection info:
@@ -209,7 +209,7 @@ Successful proxied responses use this general shape:
   "ok": true,
   "status": 200,
   "upstream_url": "http://fortisai-mcp-openapi-linkedin-upstream-...:8000/mcp",
-  "user_id": "LesterAJohn@gmail.com",
+  "user_id": "{useremail}",
   "path": "/linkedin_search_jobs",
   "mode": "mcp-streamable-http",
   "tool": "search_jobs",
