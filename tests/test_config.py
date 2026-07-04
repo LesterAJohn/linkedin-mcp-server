@@ -498,6 +498,31 @@ class TestLoaders:
         config = load_config()
         assert config.server.user_id == "arg-user"
 
+    def test_load_from_args_fortisai_uvx_profile_capture(self, monkeypatch):
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "linkedin-mcp-server",
+                "--user-id",
+                "LesterAJohn@gmail.com",
+                "--user-data-dir",
+                "/opt/fortisai/linkedin/users/lesterajohn-gmail-com/profile",
+                "--login-timeout",
+                "1800",
+                "--login",
+            ],
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(AppConfig())
+        assert config.server.user_id == "LesterAJohn@gmail.com"
+        assert (
+            config.browser.user_data_dir
+            == "/opt/fortisai/linkedin/users/lesterajohn-gmail-com/profile"
+        )
+        assert config.browser.login_timeout_seconds == 1800
+        assert config.server.login is True
+
     def test_load_from_env_slow_mo(self, monkeypatch):
         monkeypatch.setenv("SLOW_MO", "100")
         from linkedin_mcp_server.config.loaders import load_from_env
