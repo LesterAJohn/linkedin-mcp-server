@@ -90,6 +90,57 @@ When you set up or maintain this server, verify its entry in the MCP client conf
 > [!NOTE]
 > Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. If you prefer to create a session explicitly, run `uvx mcp-server-linkedin@latest --login`.
 
+### GitHub-backed uvx for managed deployments
+
+Use the PyPI `@latest` command above for normal installs. For managed deployments
+that must run this GitHub fork before a PyPI release catches up, point `uvx` at
+the repository and keep the command name explicit:
+
+```bash
+uvx --from git+https://github.com/LesterAJohn/linkedin-mcp-server.git \
+  mcp-server-linkedin \
+  --user-id "LesterAJohn@gmail.com" \
+  --user-data-dir "/opt/fortisai/linkedin/users/lesterajohn-gmail-com/profile" \
+  --login-timeout 1800 \
+  --login
+```
+
+For streamable HTTP runtimes, the same source can be used in an MCP client or
+service supervisor:
+
+```json
+{
+  "mcpServers": {
+    "mcp-server-linkedin": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/LesterAJohn/linkedin-mcp-server.git",
+        "mcp-server-linkedin",
+        "--transport",
+        "streamable-http",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--path",
+        "/mcp"
+      ],
+      "env": {
+        "UV_HTTP_TIMEOUT": "300",
+        "USER_ID": "LesterAJohn@gmail.com",
+        "USER_DATA_DIR": "/opt/fortisai/linkedin/users/lesterajohn-gmail-com/profile"
+      }
+    }
+  }
+}
+```
+
+`USER_ID` is a logical routing identity; it does not replace
+`--user-data-dir`. Multi-user systems should give each user a distinct
+`USER_DATA_DIR` and keep `USER_ID` aligned with the identity used by the MCP
+gateway or OpenWebUI request headers.
+
 ### uvx Setup Help
 
 <details>
@@ -261,6 +312,17 @@ Docker runs headless (no browser window), so you need to create a browser profil
 
 ```bash
 uvx mcp-server-linkedin@latest --login
+```
+
+For a managed fork deployment that must use the GitHub source instead of the
+current PyPI package, use:
+
+```bash
+uvx --from git+https://github.com/LesterAJohn/linkedin-mcp-server.git \
+  mcp-server-linkedin \
+  --user-id "LesterAJohn@gmail.com" \
+  --user-data-dir "$HOME/.linkedin-mcp/profile" \
+  --login
 ```
 
 This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile and cookies are saved under `~/.linkedin-mcp/`. On startup, Docker derives a Linux browser profile from your host cookies and creates a fresh session each time. If you experience stability issues with Docker, consider using the [uvx setup](#-uvx-setup-recommended---universal) instead.

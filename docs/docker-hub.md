@@ -30,6 +30,18 @@ Create a browser profile locally, then mount it into Docker. You still need [uv]
 uvx mcp-server-linkedin@latest --login
 ```
 
+For managed deployments that need this GitHub fork before a PyPI release catches
+up, point `uvx` at the repository and pass the logical user identity with its
+own browser profile path:
+
+```bash
+uvx --from git+https://github.com/LesterAJohn/linkedin-mcp-server.git \
+  mcp-server-linkedin \
+  --user-id "LesterAJohn@gmail.com" \
+  --user-data-dir "$HOME/.linkedin-mcp/profile" \
+  --login
+```
+
 This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile and cookies are saved under `~/.linkedin-mcp/`. On startup, Docker derives a Linux browser profile from your host cookies and creates a fresh session each time. For better stability, consider the [uvx setup](https://github.com/stickerdaniel/linkedin-mcp-server#-uvx-setup-recommended---universal).
 
 > **Already signed into LinkedIn in a browser on the host?** Run `uvx mcp-server-linkedin@latest --import-from-browser` on the host to reuse that session instead of `--login`. It supports Chrome, Chromium, Brave, Edge, Arc, Vivaldi, Helium, Yandex, and Naver Whale, auto-picks the most recently used browser with a live LinkedIn session (pass a browser name to target one), writes the same `~/.linkedin-mcp/` profile Docker mounts, and the Docker bridge still narrows to the minimal auth cookie subset it uses for a normal session. Cookies under Chrome 127+ app-bound encryption cannot be imported; use `--login` in that case.
