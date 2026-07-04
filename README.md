@@ -343,7 +343,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
       "args": [
         "run", "--rm", "-i",
         "-v", "~/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
-        "stickerdaniel/linkedin-mcp-server:latest"
+        "LesterAJohn/linkedin-mcp-server:latest"
       ]
     }
   }
@@ -394,7 +394,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
   -p 8080:8080 \
-  stickerdaniel/linkedin-mcp-server:latest \
+  LesterAJohn/linkedin-mcp-server:latest \
   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
 ```
 
