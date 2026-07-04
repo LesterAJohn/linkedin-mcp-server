@@ -42,6 +42,10 @@ uvx --from git+https://github.com/LesterAJohn/linkedin-mcp-server.git \
   --login
 ```
 
+If this server is running behind the FortisAI OpenAPI facade, see
+[FortisAI OpenAPI Facade](fortisai-openapi-facade.md) for the `/linkedin_*`
+endpoint syntax and user-routing headers.
+
 This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile and cookies are saved under `~/.linkedin-mcp/`. On startup, Docker derives a Linux browser profile from your host cookies and creates a fresh session each time. For better stability, consider the [uvx setup](https://github.com/stickerdaniel/linkedin-mcp-server#-uvx-setup-recommended---universal).
 
 > **Already signed into LinkedIn in a browser on the host?** Run `uvx mcp-server-linkedin@latest --import-from-browser` on the host to reuse that session instead of `--login`. It supports Chrome, Chromium, Brave, Edge, Arc, Vivaldi, Helium, Yandex, and Naver Whale, auto-picks the most recently used browser with a live LinkedIn session (pass a browser name to target one), writes the same `~/.linkedin-mcp/` profile Docker mounts, and the Docker bridge still narrows to the minimal auth cookie subset it uses for a normal session. Cookies under Chrome 127+ app-bound encryption cannot be imported; use `--login` in that case.

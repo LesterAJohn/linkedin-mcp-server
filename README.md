@@ -141,6 +141,12 @@ service supervisor:
 `USER_DATA_DIR` and keep `USER_ID` aligned with the identity used by the MCP
 gateway or OpenWebUI request headers.
 
+When this server is deployed behind the FortisAI OpenAPI facade, OpenWebUI and
+curl clients use `/linkedin_*` HTTP routes on the facade while the upstream MCP
+server remains on `/mcp`. See
+[FortisAI OpenAPI Facade](docs/fortisai-openapi-facade.md) for endpoint syntax,
+user-routing headers, and examples.
+
 ### uvx Setup Help
 
 <details>
