@@ -706,6 +706,24 @@ class TestMessagingTools:
         expected = {
             "url": "https://www.linkedin.com/messaging/",
             "sections": {"inbox": "Conversation 1\nConversation 2"},
+            "conversations": [
+                {
+                    "index": 0,
+                    "participant": "Conversation 1",
+                    "read_state": "read",
+                },
+                {
+                    "index": 1,
+                    "participant": "Conversation 2",
+                    "read_state": "unread",
+                },
+            ],
+            "conversation_counts": {
+                "total": 2,
+                "read": 1,
+                "unread": 1,
+                "unknown": 0,
+            },
         }
         mock_extractor = _make_mock_extractor(expected)
 
@@ -718,6 +736,8 @@ class TestMessagingTools:
         result = await tool_fn(mock_context, extractor=mock_extractor)
 
         assert result["sections"]["inbox"] == "Conversation 1\nConversation 2"
+        assert result["conversation_counts"]["read"] == 1
+        assert result["conversation_counts"]["unread"] == 1
         mock_extractor.get_inbox.assert_awaited_once_with(limit=20)
 
     async def test_get_conversation_success(self, mock_context):

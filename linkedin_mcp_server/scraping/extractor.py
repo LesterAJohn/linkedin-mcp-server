@@ -3365,6 +3365,9 @@ class LinkedInExtractor:
             build_references(raw_result["references"], "inbox") if cleaned else []
         )
 
+        conversation_summaries = await self._extract_inbox_conversation_summaries(
+            limit=limit
+        )
         # LinkedIn's conversation sidebar uses JS click handlers instead of
         # <a> tags, so anchor extraction cannot capture thread IDs.  Click each
         # conversation item and read the resulting SPA URL to build references.
@@ -3374,12 +3377,127 @@ class LinkedInExtractor:
         if conversation_refs:
             references = dedupe_references(conversation_refs + references)
 
-        return self._single_section_result(
+        for index, ref in enumerate(conversation_refs):
+            if index >= len(conversation_summaries):
+                break
+            conversation_summaries[index]["thread_id"] = self._extract_thread_id(
+                ref.get("url", "")
+            )
+            conversation_summaries[index]["thread_url"] = ref.get("url", "")
+
+        counts = {
+            "total": len(conversation_summaries),
+            "read": sum(
+                1
+                for item in conversation_summaries
+                if item.get("read_state") == "read"
+            ),
+            "unread": sum(
+                1
+                for item in conversation_summaries
+                if item.get("read_state") == "unread"
+            ),
+            "unknown": sum(
+                1
+                for item in conversation_summaries
+                if item.get("read_state") == "unknown"
+            ),
+        }
+
+        result = self._single_section_result(
             url,
             "inbox",
             cleaned,
             references=references,
         )
+        result["conversations"] = conversation_summaries
+        result["conversation_counts"] = counts
+        return result
+
+    async def _extract_inbox_conversation_summaries(
+        self, limit: int | None
+    ) -> list[dict[str, Any]]:
+        """Return visible inbox rows with best-effort read/unread state.
+
+        This intentionally runs before click-based thread-id enumeration,
+        because selecting an unread conversation can mark it as read. LinkedIn
+        does not expose a stable public read-state API in the DOM, so the state
+        is derived from accessible labels, class names, and hidden status text.
+        If no reliable signal is present, the row is marked ``unknown``.
+        """
+        try:
+            await self._page.wait_for_selector(
+                "main li label[aria-label]",
+                state="attached",
+                timeout=10000,
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("conversation labels did not appear within 10s")
+            return []
+
+        rows: list[dict[str, Any]] = await self._page.evaluate(
+            """({ limit }) => {
+                const labels = Array.from(document.querySelectorAll(
+                    'main li label[aria-label]'
+                ));
+                const cap = (limit == null)
+                    ? labels.length
+                    : Math.min(labels.length, limit);
+                const normalize = (value) => String(value || '')
+                    .replace(/\\s+/g, ' ').trim();
+                const lower = (value) => normalize(value).toLowerCase();
+                const results = [];
+                for (let i = 0; i < cap; i++) {
+                    const label = labels[i];
+                    const row = label.closest('li');
+                    if (!row) continue;
+                    const ariaLabel = normalize(
+                        label.getAttribute('aria-label') || ''
+                    );
+                    const rowText = normalize(row.innerText || '');
+                    const classText = lower(row.getAttribute('class') || '');
+                    const stateText = lower([
+                        ariaLabel,
+                        rowText,
+                        classText,
+                        Array.from(row.querySelectorAll('[aria-label]'))
+                            .map(el => el.getAttribute('aria-label') || '')
+                            .join(' '),
+                        Array.from(row.querySelectorAll('.visually-hidden'))
+                            .map(el => el.innerText || el.textContent || '')
+                            .join(' '),
+                        Array.from(row.querySelectorAll('[class]'))
+                            .map(el => el.getAttribute('class') || '')
+                            .join(' '),
+                    ].join(' '));
+                    const unread = /\\bunread\\b/.test(stateText)
+                        || /msg-conversation-card--unread/.test(stateText)
+                        || /notification-badge|unread-count/.test(stateText);
+                    const read = !unread && (
+                        /\\bread\\b/.test(stateText)
+                        || /msg-conversation-card/.test(classText)
+                    );
+                    results.push({
+                        index: i,
+                        aria_label: ariaLabel,
+                        participant: ariaLabel.replace(
+                            /^Select conversation with\\s+/i, ''
+                        ).trim(),
+                        read_state: unread
+                            ? 'unread'
+                            : (read ? 'read' : 'unknown'),
+                    });
+                }
+                return results;
+            }""",
+            {"limit": limit},
+        )
+
+        for row in rows:
+            row["participant"] = self._strip_select_conversation_prefix(
+                str(row.get("aria_label", ""))
+            )
+        return rows
 
     async def _extract_conversation_thread_refs(
         self, limit: int | None, context: str, *, name_filter: str | None = None
