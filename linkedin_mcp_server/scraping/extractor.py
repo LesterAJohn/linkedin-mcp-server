@@ -3423,7 +3423,8 @@ class LinkedInExtractor:
         because selecting an unread conversation can mark it as read. LinkedIn
         does not expose a stable public read-state API in the DOM, so the state
         is derived from accessible labels, class names, and hidden status text.
-        If no reliable signal is present, the row is marked ``unknown``.
+        A visible conversation row with no unread marker is treated as read;
+        malformed or non-conversation rows are marked ``unknown``.
         """
         try:
             await self._page.wait_for_selector(
@@ -3473,9 +3474,12 @@ class LinkedInExtractor:
                     const unread = /\\bunread\\b/.test(stateText)
                         || /msg-conversation-card--unread/.test(stateText)
                         || /notification-badge|unread-count/.test(stateText);
+                    const hasConversationRow =
+                        /^select conversation with\\s+/i.test(ariaLabel)
+                        || /msg-conversation|conversation-card|msg-conversations/.test(stateText);
                     const read = !unread && (
                         /\\bread\\b/.test(stateText)
-                        || /msg-conversation-card/.test(classText)
+                        || hasConversationRow
                     );
                     results.push({
                         index: i,
