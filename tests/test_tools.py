@@ -33,6 +33,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_conversation = AsyncMock(return_value=scrape_result)
     mock.search_conversations = AsyncMock(return_value=scrape_result)
     mock.send_message = AsyncMock(return_value=scrape_result)
+    mock.reply_message = AsyncMock(return_value=scrape_result)
     mock.get_my_profile = AsyncMock(return_value=scrape_result)
     mock.search_companies = AsyncMock(return_value=scrape_result)
     mock.get_company_employees = AsyncMock(return_value=scrape_result)
@@ -863,6 +864,59 @@ class TestMessagingTools:
                 extractor=mock_extractor,
             )
 
+    async def test_reply_message_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/abc123/",
+            "status": "sent",
+            "message": "Message sent.",
+            "recipient_selected": True,
+            "sent": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "reply_message")
+        result = await tool_fn(
+            "2-abc123",
+            "Follow-up",
+            True,
+            mock_context,
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+        mock_extractor.reply_message.assert_awaited_once_with(
+            "2-abc123", "Follow-up", confirm_send=True
+        )
+
+    async def test_reply_message_error(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        mock_extractor = MagicMock()
+        mock_extractor.reply_message = AsyncMock(side_effect=SessionExpiredError())
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "reply_message")
+        with pytest.raises(ToolError, match="Session expired"):
+            await tool_fn(
+                "2-abc123",
+                "Follow-up",
+                True,
+                mock_context,
+                extractor=mock_extractor,
+            )
+
 
 class TestGetMyProfileTool:
     async def test_get_my_profile_success(self, mock_context):
@@ -1191,6 +1245,7 @@ class TestToolTimeouts:
             "get_conversation",
             "search_conversations",
             "send_message",
+            "reply_message",
             "get_feed",
             "close_session",
         )
@@ -1222,6 +1277,7 @@ class TestToolTimeouts:
             "get_conversation",
             "search_conversations",
             "send_message",
+            "reply_message",
             "get_feed",
             "close_session",
         )

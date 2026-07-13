@@ -3912,21 +3912,6 @@ class LinkedInExtractor:
                 message_surface,
             )
 
-        compose_box = await self._resolve_message_compose_box()
-        if compose_box is None:
-            await self._dismiss_message_ui()
-            return self._message_action_result(
-                self._page.url,
-                "composer_unavailable",
-                "LinkedIn did not expose a usable message composer.",
-                recipient_selected=recipient_selected,
-            )
-
-        logger.debug(
-            "Message compose box resolved for %s after hydration",
-            linkedin_username,
-        )
-
         if not await self._compose_page_matches_recipient(
             display_name or "",
             linkedin_username,
@@ -3943,6 +3928,83 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
             )
         recipient_selected = True
+
+        return await self._send_message_from_open_composer(
+            message,
+            confirm_send=confirm_send,
+            recipient_selected=recipient_selected,
+        )
+
+    async def reply_message(
+        self,
+        thread_id: str,
+        message: str,
+        *,
+        confirm_send: bool,
+    ) -> dict[str, Any]:
+        """Reply inside an existing LinkedIn conversation thread.
+
+        Requires a concrete ``thread_id`` so this path never enters the
+        recipient-picker compose flow that can start a new thread.
+        """
+        clean_thread_id = thread_id.strip()
+        if not clean_thread_id:
+            raise LinkedInScraperException("thread_id must be a non-empty string")
+
+        target_url = f"https://www.linkedin.com/messaging/thread/{clean_thread_id}/"
+        await self._navigate_to_page(target_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Thread page did not fully load for %s", clean_thread_id)
+
+        await handle_modal_close(self._page)
+        current_thread_id = self._extract_thread_id(self._page.url)
+        if current_thread_id != clean_thread_id:
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "thread_mismatch",
+                "LinkedIn did not open the requested conversation thread.",
+                recipient_selected=False,
+            )
+
+        message_surface = await self._wait_for_message_surface()
+        if message_surface == "recipient_picker":
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "thread_mismatch",
+                "LinkedIn opened recipient selection instead of the requested thread.",
+                recipient_selected=False,
+            )
+
+        return await self._send_message_from_open_composer(
+            message,
+            confirm_send=confirm_send,
+            recipient_selected=True,
+        )
+
+    async def _send_message_from_open_composer(
+        self,
+        message: str,
+        *,
+        confirm_send: bool,
+        recipient_selected: bool,
+    ) -> dict[str, Any]:
+        """Send (or dry-run) from an already-open LinkedIn message composer."""
+
+        compose_box = await self._resolve_message_compose_box()
+        if compose_box is None:
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "composer_unavailable",
+                "LinkedIn did not expose a usable message composer.",
+                recipient_selected=recipient_selected,
+            )
 
         if not confirm_send:
             await self._dismiss_message_ui()

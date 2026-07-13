@@ -4935,6 +4935,135 @@ class TestSendMessage:
         assert "interop=msgOverlay" in compose_url
 
 
+class TestReplyMessage:
+    async def test_dry_run_returns_confirmation_required(self, mock_page):
+        """reply_message with confirm_send=False returns confirmation_required."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/messaging/thread/2-abc123/"
+
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_wait_for_message_surface",
+                new_callable=AsyncMock,
+                return_value="composer",
+            ),
+            patch.object(
+                extractor,
+                "_resolve_message_compose_box",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                extractor,
+                "_dismiss_message_ui",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.reply_message(
+                "2-abc123", "Hello in-thread", confirm_send=False
+            )
+
+        assert result["status"] == "confirmation_required"
+        assert result["sent"] is False
+        assert result["recipient_selected"] is True
+
+    async def test_returns_thread_mismatch_when_redirected(self, mock_page):
+        """reply_message fails closed when LinkedIn opens a different thread."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/messaging/thread/2-other/"
+
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_dismiss_message_ui",
+                new_callable=AsyncMock,
+            ) as dismiss_mock,
+        ):
+            result = await extractor.reply_message(
+                "2-abc123", "Hello in-thread", confirm_send=True
+            )
+
+        assert result["status"] == "thread_mismatch"
+        assert result["sent"] is False
+        dismiss_mock.assert_awaited_once()
+
+    async def test_sends_from_existing_thread(self, mock_page):
+        """reply_message sends when the requested thread composer is open."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/messaging/thread/2-abc123/"
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+        # evaluate returns: True (focus), True (send button click)
+        mock_page.evaluate = AsyncMock(side_effect=[True, True])
+
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_wait_for_message_surface",
+                new_callable=AsyncMock,
+                return_value="composer",
+            ),
+            patch.object(
+                extractor,
+                "_resolve_message_compose_box",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                extractor,
+                "_dismiss_message_ui",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_message_text_visible",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.reply_message(
+                "2-abc123", "Hello in-thread", confirm_send=True
+            )
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+        mock_keyboard.type.assert_awaited_once_with("Hello in-thread", delay=15)
+
+
 class TestResolveMessageComposeBox:
     async def test_returns_locator_when_count_positive(self, mock_page):
         """_resolve_message_compose_box returns locator.last when count() > 0."""
