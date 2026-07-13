@@ -41,7 +41,7 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `get_my_profile` | Get the authenticated user's own LinkedIn profile (same sections as get_person_profile) | working |
 | `connect_with_person` | Send a connection request or accept an incoming one, with optional note | [#407](https://github.com/stickerdaniel/linkedin-mcp-server/issues/407) [#432](https://github.com/stickerdaniel/linkedin-mcp-server/issues/432) [#454](https://github.com/stickerdaniel/linkedin-mcp-server/issues/454) |
 | `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page | working |
-| `get_inbox` | List recent conversations from the LinkedIn messaging inbox, including structured `conversation_counts` and best-effort read/unread state; visible rows without unread markers are counted as read | working |
+| `get_inbox` | List recent conversations from the LinkedIn messaging inbox, including structured `conversation_counts`, best-effort read/unread state, and conversation references with `last_activity`, `preview`, `active`, `has_unread_marker`, `row_text`, and `read_state_confidence`; visible rows without unread markers are counted as read | working |
 | `get_conversation` | Read a specific messaging conversation by username or thread ID | working |
 | `search_conversations` | Search messages by keyword | working |
 | `send_message` | Send a message to a LinkedIn user (requires confirmation) | [#433](https://github.com/stickerdaniel/linkedin-mcp-server/issues/433) [#441](https://github.com/stickerdaniel/linkedin-mcp-server/issues/441) [#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483) [#560](https://github.com/stickerdaniel/linkedin-mcp-server/issues/560) |
@@ -54,6 +54,8 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `get_job_details` | Get detailed information about a specific job posting | working |
 | `get_feed` | Get recent posts from the authenticated user's home feed | working |
 | `close_session` | Close browser session and clean up resources | working |
+
+Messaging conversation references returned by `get_inbox` and `search_conversations` now include row-level metadata captured from the inbox sidebar: `last_activity`, `preview`, `active`, `has_unread_marker`, `row_text`, and `read_state_confidence`.
 
 <br/>
 <br/>

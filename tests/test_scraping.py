@@ -4568,6 +4568,44 @@ class TestResolveConversationThreadUrls:
 
         assert captured["arg"] == {"limit": 50, "nameFilter": "Jacki McMahan"}
 
+    async def test_extract_refs_exposes_row_metadata(self, mock_page):
+        """Conversation refs expose the stronger inbox row fields."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.wait_for_selector = AsyncMock()
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "ariaLabel": "Select conversation with Jacki McMahan",
+                    "threadId": "2-aaa",
+                    "lastActivity": "Jul 13",
+                    "preview": "Following up on the demo",
+                    "active": True,
+                    "hasUnreadMarker": False,
+                    "rowText": "Jacki McMahan Jul 13 Following up on the demo",
+                    "readStateConfidence": "medium",
+                }
+            ]
+        )
+
+        refs = await extractor._extract_conversation_thread_refs(
+            limit=20, context="inbox"
+        )
+
+        assert refs == [
+            {
+                "kind": "conversation",
+                "url": "/messaging/thread/2-aaa/",
+                "text": "Jacki McMahan",
+                "context": "inbox",
+                "last_activity": "Jul 13",
+                "preview": "Following up on the demo",
+                "active": True,
+                "has_unread_marker": False,
+                "row_text": "Jacki McMahan Jul 13 Following up on the demo",
+                "read_state_confidence": "medium",
+            }
+        ]
+
 
 class TestSearchConversations:
     async def test_returns_search_results(self, mock_page):

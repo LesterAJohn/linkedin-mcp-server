@@ -89,7 +89,7 @@
     },
     {
       "name": "get_inbox",
-      "description": "List recent conversations from the LinkedIn messaging inbox"
+      "description": "List recent conversations from the LinkedIn messaging inbox, with conversation references that include last_activity, preview, active, has_unread_marker, row_text, and read_state_confidence"
     },
     {
       "name": "get_conversation",

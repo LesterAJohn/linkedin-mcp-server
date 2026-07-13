@@ -19,6 +19,8 @@ ReferenceKind = Literal[
     "external",
 ]
 
+ReadStateConfidence = Literal["high", "medium", "low"]
+
 
 class Reference(TypedDict):
     """Compact reference payload returned to MCP clients."""
@@ -28,6 +30,12 @@ class Reference(TypedDict):
     text: NotRequired[str]
     context: NotRequired[str]
     value: NotRequired[str]
+    last_activity: NotRequired[str]
+    preview: NotRequired[str]
+    active: NotRequired[bool]
+    has_unread_marker: NotRequired[bool]
+    row_text: NotRequired[str]
+    read_state_confidence: NotRequired[ReadStateConfidence]
 
 
 class RawReference(TypedDict, total=False):

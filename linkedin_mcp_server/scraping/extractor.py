@@ -3558,8 +3558,38 @@ class LinkedInExtractor:
         # clickable element, so class-name selectors are unavoidable here.
         # The aria-label value flows through unmodified — Python strips any
         # known locale prefix to derive a clean participant name for refs.
-        conversations: list[dict[str, str]] = await self._page.evaluate(
+        conversations: list[dict[str, Any]] = await self._page.evaluate(
             """async ({ limit, nameFilter }) => {
+                const cleanText = value => (value || '')
+                    .replace(/\s+/g, ' ').trim();
+                const uniqueLines = text => {
+                    const seen = new Set();
+                    const lines = [];
+                    for (const line of (text || '').split(/\n+/)) {
+                        const cleaned = cleanText(line);
+                        if (!cleaned || seen.has(cleaned)) continue;
+                        seen.add(cleaned);
+                        lines.push(cleaned);
+                    }
+                    return lines;
+                };
+                const hasBoldLeafText = row => {
+                    const elements = Array.from(row.querySelectorAll('*'));
+                    return elements.some(node => {
+                        if (!(node instanceof HTMLElement)) return false;
+                        const text = cleanText(node.innerText);
+                        if (!text) return false;
+                        const childRepeatsText = Array.from(node.children).some(
+                            child => cleanText(child.innerText) === text
+                        );
+                        if (childRepeatsText) return false;
+                        const weight = Number.parseInt(
+                            getComputedStyle(node).fontWeight,
+                            10
+                        );
+                        return Number.isFinite(weight) && weight >= 600;
+                    });
+                };
                 const labels = Array.from(document.querySelectorAll(
                     'main li label[aria-label]'
                 ));
@@ -3576,15 +3606,47 @@ class LinkedInExtractor:
                 const results = [];
                 for (let i = 0; i < cap; i++) {
                     const label = labels[i];
+                    const row = label.closest('li');
+                    if (!row) continue;
                     const ariaLabel = label.getAttribute('aria-label') || '';
                     const rowName = ariaLabel
                         .replace(/^Select conversation with\\s+/i, '')
                         .replace(/\\s+/g, ' ').trim().toLowerCase();
                     if (wanted && rowName !== wanted) continue;
-                    const clickTarget = label.closest('li')
+                    const clickTarget = row
                         ?.querySelector('div[class*="listitem__link"]');
                     if (!clickTarget) continue;
+                    const rowText = cleanText(row.innerText);
+                    const rowLines = uniqueLines(row.innerText);
+                    const lastActivity = cleanText(
+                        row.querySelector('time, [datetime]')?.textContent || ''
+                    );
+                    const active = Boolean(
+                        row.matches('[aria-current="page"], [aria-selected="true"]')
+                        || row.querySelector(
+                            '[aria-current="page"], [aria-selected="true"], input:checked, [checked]'
+                        )
+                        || /(^|\s)(active|selected)(\s|$)/i.test(
+                            `${row.className} ${clickTarget.className}`
+                        )
+                    );
+                    const hasUnreadMarker = Boolean(
+                        row.querySelector('[data-test-unread], [class*="unread"]')
+                    );
+                    const preview = rowLines.find(line => (
+                        line !== cleanText(ariaLabel)
+                        && line !== cleanText(rowName)
+                        && line !== lastActivity
+                    )) || '';
+                    const readStateConfidence = hasUnreadMarker
+                        ? 'high'
+                        : hasBoldLeafText(row)
+                            ? 'medium'
+                            : 'low';
                     const before = location.href;
+                    const beforeMatch = before.match(
+                        /\/messaging\/thread\/([^/?#]+)/
+                    );
                     clickTarget.click();
                     // Poll for the SPA URL to settle on the thread route. The
                     // Ember click handler can take a moment to bind after the
@@ -3598,9 +3660,18 @@ class LinkedInExtractor:
                     }
                     const match = after.match(
                         /\\/messaging\\/thread\\/([^/?#]+)/
-                    );
+                    ) || (active ? beforeMatch : null);
                     if (match) {
-                        results.push({ ariaLabel, threadId: match[1] });
+                        results.push({
+                            ariaLabel,
+                            threadId: match[1],
+                            lastActivity,
+                            preview,
+                            active,
+                            hasUnreadMarker,
+                            rowText,
+                            readStateConfidence,
+                        });
                     }
                 }
                 return results;
@@ -3613,6 +3684,12 @@ class LinkedInExtractor:
                 "kind": "conversation",
                 "url": f"/messaging/thread/{conv['threadId']}/",
                 "context": context,
+                "last_activity": conv.get("lastActivity", ""),
+                "preview": conv.get("preview", ""),
+                "active": bool(conv.get("active")),
+                "has_unread_marker": bool(conv.get("hasUnreadMarker")),
+                "row_text": conv.get("rowText", ""),
+                "read_state_confidence": conv.get("readStateConfidence", "low"),
             }
             name = self._strip_select_conversation_prefix(conv.get("ariaLabel", ""))
             if name:
