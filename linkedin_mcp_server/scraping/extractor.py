@@ -3670,7 +3670,7 @@ class LinkedInExtractor:
             return []
 
         rows: list[dict[str, Any]] = await self._page.evaluate(
-            """({ limit }) => {
+            r"""({ limit }) => {
                 const labels = Array.from(document.querySelectorAll(
                     'main li label[aria-label]'
                 ));
@@ -3792,7 +3792,7 @@ class LinkedInExtractor:
         # The aria-label value flows through unmodified — Python strips any
         # known locale prefix to derive a clean participant name for refs.
         conversations: list[dict[str, Any]] = await self._page.evaluate(
-            """async ({ limit, nameFilter }) => {
+            r"""async ({ limit, nameFilter }) => {
                 const cleanText = value => (value || '')
                     .replace(/\s+/g, ' ').trim();
                 const uniqueLines = text => {
