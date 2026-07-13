@@ -3678,7 +3678,7 @@ class LinkedInExtractor:
                     ? labels.length
                     : Math.min(labels.length, limit);
                 const normalize = (value) => String(value || '')
-                    .replace(/\\s+/g, ' ').trim();
+                    .replace(/\s+/g, ' ').trim();
                 const lower = (value) => normalize(value).toLowerCase();
                 const results = [];
                 for (let i = 0; i < cap; i++) {
@@ -3718,7 +3718,7 @@ class LinkedInExtractor:
                         index: i,
                         aria_label: ariaLabel,
                         participant: ariaLabel.replace(
-                            /^Select conversation with\\s+/i, ''
+                            /^Select conversation with\s+/i, ''
                         ).trim(),
                         read_state: unread
                             ? 'unread'
@@ -3835,7 +3835,7 @@ class LinkedInExtractor:
                 // matches. Only the matching row is clicked — clicking marks a
                 // row read, so unrelated threads must not be clicked.
                 const wanted = (nameFilter || '')
-                    .replace(/\\s+/g, ' ').trim().toLowerCase();
+                    .replace(/\s+/g, ' ').trim().toLowerCase();
                 const results = [];
                 for (let i = 0; i < cap; i++) {
                     const label = labels[i];
@@ -3843,8 +3843,8 @@ class LinkedInExtractor:
                     if (!row) continue;
                     const ariaLabel = label.getAttribute('aria-label') || '';
                     const rowName = ariaLabel
-                        .replace(/^Select conversation with\\s+/i, '')
-                        .replace(/\\s+/g, ' ').trim().toLowerCase();
+                        .replace(/^Select conversation with\s+/i, '')
+                        .replace(/\s+/g, ' ').trim().toLowerCase();
                     if (wanted && rowName !== wanted) continue;
                     const clickTarget = row
                         ?.querySelector('div[class*="listitem__link"]');
@@ -3889,10 +3889,10 @@ class LinkedInExtractor:
                         await new Promise(r => setTimeout(r, 100));
                         after = location.href;
                         if (after !== before
-                            && /\\/messaging\\/thread\\//.test(after)) break;
+                            && /\/messaging\/thread\//.test(after)) break;
                     }
                     const match = after.match(
-                        /\\/messaging\\/thread\\/([^/?#]+)/
+                        /\/messaging\/thread\/([^/?#]+)/
                     ) || (active ? beforeMatch : null);
                     if (match) {
                         results.push({
