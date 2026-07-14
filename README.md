@@ -110,10 +110,10 @@ that must run this GitHub fork before a PyPI release catches up, point `uvx` at
 the repository and keep the command name explicit:
 
 ```bash
-uvx --from git+https://github.com/LesterAJohn/linkedin-mcp-server.git \
+uvx --from git+https://github.com/{user}/linkedin-mcp-server.git \
   mcp-server-linkedin \
   --user-id "{useremail}" \
-  --user-data-dir "/opt/fortisai/linkedin/users/lesterajohn-gmail-com/profile" \
+  --user-data-dir "/opt/fortisai/linkedin/users/{user}/profile" \
   --login-timeout 1800 \
   --login
 ```
@@ -128,7 +128,7 @@ service supervisor:
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/LesterAJohn/linkedin-mcp-server.git",
+        "git+https://github.com/{user}/linkedin-mcp-server.git",
         "mcp-server-linkedin",
         "--transport",
         "streamable-http",
@@ -142,7 +142,7 @@ service supervisor:
       "env": {
         "UV_HTTP_TIMEOUT": "300",
         "USER_ID": "{useremail}",
-        "USER_DATA_DIR": "/opt/fortisai/linkedin/users/lesterajohn-gmail-com/profile"
+        "USER_DATA_DIR": "/opt/fortisai/linkedin/users/{user}/profile"
       }
     }
   }
@@ -337,7 +337,7 @@ For a managed fork deployment that must use the GitHub source instead of the
 current PyPI package, use:
 
 ```bash
-uvx --from git+https://github.com/LesterAJohn/linkedin-mcp-server.git \
+uvx --from git+https://github.com/{user}/linkedin-mcp-server.git \
   mcp-server-linkedin \
   --user-id "{useremail}" \
   --user-data-dir "$HOME/.linkedin-mcp/profile" \
@@ -356,7 +356,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
       "args": [
         "run", "--rm", "-i",
         "-v", "~/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
-        "LesterAJohn/linkedin-mcp-server:latest"
+        "{user}/linkedin-mcp-server:latest"
       ]
     }
   }
@@ -407,7 +407,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
   -p 8080:8080 \
-  LesterAJohn/linkedin-mcp-server:latest \
+  {user}/linkedin-mcp-server:latest \
   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
 ```
 
