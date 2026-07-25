@@ -43,6 +43,22 @@ def register_company_tools(
         """
         Get a specific company's LinkedIn profile.
 
+        Use for a known company's about page and optional posts/jobs sections.
+        Do not use for company discovery (use search_companies) or employee
+        demographics (use get_company_employees). Read-only: navigates LinkedIn
+        but does not intentionally change account data.
+
+        Requires network access, Patchright Chromium, an authenticated LinkedIn
+        browser profile, and the company's LinkedIn URL slug rather than an
+        arbitrary display name. The server selects the active profile/runtime;
+        this tool has no environment selector. Response: {"url": str,
+        "sections": {name: raw_text}} with optional references, section_errors,
+        and unknown_sections. Common failures include a wrong slug, unavailable
+        company/section, expired login, rate limiting, browser failure, or timeout.
+        Call search_companies first when the slug is unknown; use a returned
+        company_urn with search_people. Example input: {"company_name": "docker",
+        "sections": "posts,jobs"}.
+
         Args:
             company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft")
             ctx: FastMCP context for progress reporting
@@ -110,6 +126,21 @@ def register_company_tools(
         """
         Get recent posts from a company's LinkedIn feed.
 
+        Use when only a known company's recent posts are needed. Do not use for
+        company facts (use get_company_profile) or the authenticated home feed
+        (use get_feed). Read-only: navigates the company feed without
+        intentionally changing account data.
+
+        Requires network access, Patchright Chromium, an authenticated LinkedIn
+        browser profile, and the exact company URL slug. The server selects the
+        active profile/runtime; this tool has no environment selector. Response:
+        {"url": str, "sections": {"posts": raw_text}} with optional
+        references.posts and section_errors.posts. Common failures include a
+        wrong slug, unavailable posts, expired login, rate limiting, browser
+        failure, or timeout. Call search_companies first if the slug is unknown;
+        follow returned post references for detail. Example input:
+        {"company_name": "microsoft"}.
+
         Args:
             company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft")
             ctx: FastMCP context for progress reporting
@@ -176,6 +207,20 @@ def register_company_tools(
         """
         Search for companies on LinkedIn.
 
+        Use to discover company pages or resolve a display name to its LinkedIn
+        URL slug. Do not use when the slug is already known and profile content
+        is required (use get_company_profile). Read-only: submits a LinkedIn
+        search without intentionally changing account data.
+
+        Requires network access, Patchright Chromium, and an authenticated
+        LinkedIn browser profile. The server selects the active profile/runtime;
+        this tool has no environment selector. Response: {"url": str,
+        "sections": {"search_results": raw_text}} with optional company
+        references. Common failures include empty/overbroad queries, expired
+        login, rate limiting, browser failure, or timeout. Follow with
+        get_company_profile or get_company_employees using the selected slug.
+        Example input: {"keywords": "electric vehicles"}.
+
         Args:
             keywords: Search keywords (e.g., "fintech", "anthropic", "electric vehicles")
             ctx: FastMCP context for progress reporting
@@ -239,6 +284,21 @@ def register_company_tools(
         lives at /company/anthropicresearch/, not /company/anthropic/. If you
         are unsure of the slug, call search_companies first and pick the slug
         from the returned references.
+
+        Use for a known company's employee list and aggregate demographics. Do not use
+        for network-degree/location filtering; use search_people with the numeric
+        company URN instead.
+
+        Read-only: navigates and filters the company people page without
+        intentionally changing account data. Requires network access, Patchright
+        Chromium, an authenticated LinkedIn profile, and an exact company URL
+        slug. The server selects the active profile/runtime; this tool has no
+        environment selector. Response: {"url": str, "sections": {"employees":
+        raw_text}} with optional employee profile references. Common failures
+        include a wrong slug, unavailable people tab, no keyword matches, expired
+        login, rate limiting, browser failure, or timeout. Follow references with
+        get_person_profile. Example input: {"company_name": "anthropicresearch",
+        "keywords": "engineer"}.
 
         Args:
             company_name: LinkedIn company URL slug (e.g., "docker", "anthropicresearch", "microsoft")

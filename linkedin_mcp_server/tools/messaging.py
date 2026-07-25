@@ -41,6 +41,21 @@ def register_messaging_tools(
         """
         List recent conversations from the LinkedIn messaging inbox.
 
+        Use for an inbox overview before selecting a thread. Do not use for
+        keyword filtering (use search_conversations) or a full thread body (use
+        get_conversation). Read-only: scrolls the inbox without intentionally
+        opening rows or changing message state.
+
+        Requires network access, Patchright Chromium, and an authenticated
+        LinkedIn profile with messaging access. The server selects the active
+        profile/runtime; this tool has no environment selector. Response:
+        {"url": str, "sections": {"inbox": raw_text}, "conversation_counts":
+        {"read": int, "unread": int}} with optional thread references. Common
+        failures include limit outside 1-50, restricted messaging access, expired
+        login, rate limiting, browser failure, or timeout. Follow with
+        get_conversation using a returned thread_id when available. Example input:
+        {"limit": 20}.
+
         Args:
             ctx: FastMCP context for progress reporting
             limit: Maximum number of conversations to load (1-50, default 20)
@@ -75,7 +90,7 @@ def register_messaging_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Get Conversation",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        annotations={"readOnlyHint": False, "openWorldHint": True},
         tags={"messaging", "scraping"},
         exclude_args=["extractor"],
     )
@@ -90,6 +105,22 @@ def register_messaging_tools(
         Read a specific messaging conversation.
 
         Provide either linkedin_username or thread_id to identify the conversation.
+
+        Use for full thread content after resolving a participant or thread ID.
+        Do not use to send a reply (use reply_message). Low-risk mutating read:
+        opening or enumerating matching rows can mark messages as read. Prefer a
+        known thread_id to minimize UI visits; this tool does not send messages.
+
+        Requires network access, Patchright Chromium, and an authenticated
+        LinkedIn profile with access to the conversation. The server selects the
+        active profile/runtime; this tool has no environment selector. Response:
+        {"url": str, "sections": {"conversation": raw_text}} with optional
+        references. Common failures include providing neither identifier, an
+        invalid/inaccessible thread, ambiguous participant matches, index outside
+        available matches, expired login, rate limiting, browser failure, or
+        timeout. Call search_conversations to enumerate thread IDs, then
+        reply_message only after user approval. Example input:
+        {"thread_id": "2-abc123"}.
 
         When looked up by linkedin_username, resolution searches the messaging
         inbox for the participant's display name and click-visits every
@@ -154,7 +185,7 @@ def register_messaging_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Search Conversations",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        annotations={"readOnlyHint": False, "openWorldHint": True},
         tags={"messaging", "search"},
         exclude_args=["extractor"],
     )
@@ -166,6 +197,21 @@ def register_messaging_tools(
     ) -> dict[str, Any]:
         """
         Search messages by keyword.
+
+        Use to find existing threads and enumerate thread IDs by message text or
+        participant. Do not use for an unfiltered inbox (use get_inbox) or to send
+        content. Low-risk mutating read: enumerating results selects rows in the
+        LinkedIn UI and may mark conversations as read; keep limit small.
+
+        Requires network access, Patchright Chromium, and an authenticated
+        LinkedIn profile with messaging access. The server selects the active
+        profile/runtime; this tool has no environment selector. Response:
+        {"url": str, "sections": {"search_results": raw_text}} with optional
+        conversation references containing thread IDs. Common failures include an
+        empty/noisy query, limit outside 1-50, expired login, rate limiting,
+        browser failure, or timeout. Follow with get_conversation or, after user
+        confirmation, reply_message. Example input: {"keywords": "project atlas",
+        "limit": 10}.
 
         Args:
             keywords: Search keywords to filter conversations
@@ -224,6 +270,25 @@ def register_messaging_tools(
 
         The recipient must be directly messageable from the profile page. This is a
         write operation when confirm_send is True.
+
+        Use to start or continue a profile-addressed conversation when the
+        recipient username is known. Do not use for a strict existing-thread reply
+        (use reply_message). High-risk mutating operation: confirm_send=true sends
+        external content immediately and cannot reliably be undone. First call
+        with confirm_send=false to verify composer/recipient resolution; review
+        the exact recipient and message before the confirmed call.
+
+        Requires network access, Patchright Chromium, an authenticated LinkedIn
+        profile with messaging permission, and user authorization to send. The
+        server selects the active profile/runtime; this tool has no environment
+        selector. Response: {"url": str, "status": str, "message": str,
+        "recipient_selected": bool, "sent": bool}. Common failures include an
+        unavailable Message action, recipient mismatch, invalid profile URN,
+        unavailable composer, expired login, rate limiting, browser failure, or
+        timeout. Call get_person_profile to verify username/profile_urn and
+        search_conversations afterward if inbox display lags. Example input:
+        {"linkedin_username": "stickerdaniel", "message": "Hello!",
+        "confirm_send": false}.
 
         Args:
             linkedin_username: LinkedIn username of the recipient
@@ -288,6 +353,23 @@ def register_messaging_tools(
 
         This tool requires ``thread_id`` and never uses recipient compose flows,
         so it cannot intentionally start a new conversation thread.
+
+        Use only for a reply to a verified existing thread. Do not use when only a
+        username is known (resolve the thread with search_conversations first).
+        High-risk mutating operation: confirm_send=true sends external content
+        immediately and cannot reliably be undone. First call with
+        confirm_send=false to verify that the thread and composer resolve; review
+        the exact thread and message before the confirmed call.
+
+        Requires network access, Patchright Chromium, an authenticated LinkedIn
+        profile with access to the thread, and user authorization to send. The
+        server selects the active profile/runtime; this tool has no environment
+        selector. Response: {"url": str, "status": str, "message": str,
+        "recipient_selected": bool, "sent": bool}. Common failures include an
+        empty/invalid thread ID, thread mismatch, unavailable composer, expired
+        login, rate limiting, browser failure, or timeout. Use get_conversation to
+        verify context before replying. Example input: {"thread_id": "2-abc123",
+        "message": "Thanks, I will follow up tomorrow.", "confirm_send": false}.
 
         Args:
             thread_id: LinkedIn messaging thread ID (required)

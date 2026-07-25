@@ -1245,6 +1245,62 @@ class TestFeedTools:
             await mcp.call_tool("get_feed", {"num_posts": 51})
 
 
+class TestToolDefinitions:
+    async def test_all_tools_expose_operational_guidance(self):
+        import re
+
+        from linkedin_mcp_server.server import create_mcp_server
+
+        mcp = create_mcp_server()
+        tool_names = (
+            "get_person_profile",
+            "get_my_profile",
+            "connect_with_person",
+            "get_sidebar_profiles",
+            "search_people",
+            "get_company_profile",
+            "get_company_posts",
+            "search_companies",
+            "get_company_employees",
+            "get_job_details",
+            "search_jobs",
+            "get_inbox",
+            "get_conversation",
+            "search_conversations",
+            "send_message",
+            "reply_message",
+            "get_feed",
+            "close_session",
+        )
+        required_guidance = (
+            "Use ",
+            "Do not use",
+            "Requires ",
+            "environment selector",
+            "Response:",
+            "Common failures",
+            "Example input:",
+        )
+
+        for name in tool_names:
+            tool = await mcp.get_tool(name)
+            assert tool is not None
+            description = re.sub(r"\s+", " ", tool.description or "")
+            for guidance in required_guidance:
+                assert guidance in description, f"{name} missing {guidance!r}"
+
+    async def test_message_reads_advertise_read_state_mutation(self):
+        from linkedin_mcp_server.server import create_mcp_server
+
+        mcp = create_mcp_server()
+
+        for name in ("get_conversation", "search_conversations"):
+            tool = await mcp.get_tool(name)
+            assert tool is not None
+            assert tool.annotations is not None
+            assert tool.annotations.readOnlyHint is False
+
+
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
         from linkedin_mcp_server.server import create_mcp_server
