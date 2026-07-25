@@ -75,7 +75,22 @@ def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> 
         tags={"session"},
     )
     async def close_session() -> dict[str, Any]:
-        """Close the current browser session and clean up resources."""
+        """Close the current browser session and clean up resources.
+
+        Use to release the browser after LinkedIn work is complete or before a
+        clean retry. Do not use to log out, delete cookies, switch accounts, or
+        select another runtime. Mutating local operation: closes the current
+        server-managed browser and interrupts in-flight browser work, but does not
+        delete the persistent profile; later tools may start a new browser.
+
+        Requires permission to manage this MCP server process. No LinkedIn login,
+        network access, or browser page is required. It always targets the active
+        server runtime and has no environment selector. Response: {"status":
+        "success", "message": str}. Common failures include browser shutdown
+        errors or concurrent/in-flight tool activity. Call only after dependent
+        tool calls finish; retry the original read tool afterward if closing was
+        part of recovery. Example input: {}.
+        """
         try:
             await close_browser()
             return {

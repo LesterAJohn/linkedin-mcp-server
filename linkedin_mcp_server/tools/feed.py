@@ -44,6 +44,22 @@ def register_feed_tools(
         """
         Get posts from the authenticated user's LinkedIn feed.
 
+        Use when recent home-feed posts and their permalinks are needed. Do not
+        use for one company's posts; use get_company_posts instead. Read-only:
+        navigates and scrolls LinkedIn but does not intentionally change account
+        data.
+
+        Requires network access, Patchright Chromium, and an authenticated
+        LinkedIn browser profile. The server selects the active profile/runtime;
+        this tool has no environment selector. In Docker, create and mount the
+        host profile before calling.
+
+        Response: {"url": str, "sections": {"feed": str}} with optional
+        references.feed and section_errors.feed. Common failures include expired
+        login, missing browser dependencies, LinkedIn rate limiting, navigation
+        timeout, or fewer observable permalinks than requested. Follow a returned
+        permalink when full post text is needed. Example input: {"num_posts": 10}.
+
         Args:
             ctx: FastMCP context for progress reporting
             num_posts: Number of posts to fetch (1-50, default 10).
@@ -63,6 +79,7 @@ def register_feed_tools(
             Truncated posts are not auto-expanded; full text for any post
             is reachable via its permalink in references["feed"]. The LLM
             should parse sections["feed"] for post bodies.
+
         """
         try:
             extractor = extractor or await get_ready_extractor(

@@ -38,6 +38,19 @@ def register_job_tools(
         """
         Get job details for a specific job posting on LinkedIn.
 
+        Use when a numeric LinkedIn job ID is known and full posting text is
+        needed. Do not use for discovery (use search_jobs). Read-only: navigates
+        the posting without intentionally changing account data or applying.
+
+        Requires network access, Patchright Chromium, and an authenticated
+        LinkedIn browser profile. The server selects the active profile/runtime;
+        this tool has no environment selector. Response: {"url": str,
+        "sections": {name: raw_text}} with optional references and
+        section_errors. Common failures include a malformed, expired, removed, or
+        inaccessible job ID, expired login, rate limiting, browser failure, or
+        timeout. Obtain IDs from search_jobs. Example input:
+        {"job_id": "4252026496"}.
+
         Args:
             job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
             ctx: FastMCP context for progress reporting
@@ -94,6 +107,20 @@ def register_job_tools(
         Search for jobs on LinkedIn.
 
         Returns job_ids that can be passed to get_job_details for full info.
+
+        Use for job discovery with LinkedIn's supported filters. Do not use when
+        a job ID is already known (use get_job_details). Read-only: submits and
+        paginates a search; easy_apply filters results but never applies.
+
+        Requires network access, Patchright Chromium, and an authenticated
+        LinkedIn browser profile. The server selects the active profile/runtime;
+        this tool has no environment selector. Response: {"url": str,
+        "sections": {name: raw_text}, "job_ids": [numeric_string]} with optional
+        references. Common failures include unsupported enum values, max_pages
+        outside 1-10, no matches, expired login, rate limiting, browser failure,
+        or timeout. Follow with get_job_details for selected IDs. Example input:
+        {"keywords": "data scientist", "location": "Remote", "max_pages": 2,
+        "date_posted": "past_week", "work_type": "remote", "sort_by": "date"}.
 
         Args:
             keywords: Search keywords (e.g., "software engineer", "data scientist")

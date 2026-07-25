@@ -45,6 +45,23 @@ def register_person_tools(
         """
         Get a specific person's LinkedIn profile.
 
+        Use for profile facts or explicitly selected profile sections. Do not use
+        for the authenticated account (use get_my_profile), discovery (use
+        search_people), or sidebar recommendations (use get_sidebar_profiles).
+        Read-only: navigates LinkedIn and may scroll or expand page content, but
+        does not intentionally change account data.
+
+        Requires network access, Patchright Chromium, and an authenticated
+        LinkedIn browser profile. The server selects the active profile/runtime;
+        this tool has no environment selector. In Docker, create and mount the
+        host profile first. Response: {"url": str, "sections": {name: raw_text}}
+        with optional references, section_errors, and unknown_sections. Common
+        failures include an invalid username/section, private or unavailable
+        profile, expired login, rate limiting, browser setup failure, or timeout.
+        Use returned references for follow-up entity traversal. Example input:
+        {"linkedin_username": "williamhgates", "sections": "experience,skills",
+        "max_scrolls": 10}.
+
         Args:
             linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates")
             ctx: FastMCP context for progress reporting
@@ -118,6 +135,23 @@ def register_person_tools(
     ) -> dict[str, Any]:
         """
         Search for people on LinkedIn.
+
+        Use to discover profiles from keywords and supported people-search
+        filters. Do not use when a username is already known (use
+        get_person_profile) or for company demographics (use
+        get_company_employees). Read-only: submits a LinkedIn search and does not
+        intentionally change account data.
+
+        Requires network access, Patchright Chromium, and an authenticated
+        LinkedIn browser profile. The server selects the active profile/runtime;
+        this tool has no environment selector. Response: {"url": str,
+        "sections": {"search_results": raw_text}} with optional profile
+        references. Common failures include invalid network codes, a nonnumeric
+        current_company value producing unfiltered results, expired login, rate
+        limiting, browser failure, or timeout. Call get_company_profile first to
+        obtain a company URN, then get_person_profile for a selected result.
+        Example input: {"keywords": "software engineer", "location": "New York",
+        "network": ["S"], "current_company": "1115"}.
 
         Args:
             keywords: Search keywords (e.g., "software engineer", "recruiter at Google")
@@ -200,8 +234,21 @@ def register_person_tools(
         """
         Send a LinkedIn connection request or accept an incoming one.
 
-        The tool is annotated with destructiveHint so MCP clients will
-        prompt for user confirmation before execution.
+        Use only when the user explicitly wants to connect with this profile. Do
+        not use for profile reading or following. High-risk mutating operation:
+        it can send an external invitation or accept an incoming request and
+        cannot reliably be undone. Verify the username and note before calling;
+        MCP clients should request confirmation because destructiveHint is set.
+
+        Requires network access, Patchright Chromium, an authenticated LinkedIn
+        profile, and permission to act on that account. The server selects the
+        active profile/runtime; this tool has no environment selector. Response:
+        {"url": str, "status": str, "message": str, "note_sent": bool}.
+        Common failures include unavailable Connect actions, pending/existing
+        connections, note quota or note support limits, expired login, rate
+        limiting, browser failure, or timeout. Call get_person_profile first to
+        verify the recipient. Example input: {"linkedin_username":
+        "stickerdaniel", "note": "Thanks for the conversation."}.
 
         Args:
             linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates")
@@ -268,6 +315,20 @@ def register_person_tools(
         """
         Get profile links from sidebar recommendation sections on a LinkedIn profile page.
 
+        Use to discover profiles recommended beside one known profile. Do not use
+        for keyword search (use search_people) or the target's profile details
+        (use get_person_profile). Read-only: navigates recommendation views but
+        does not intentionally change account data.
+
+        Requires network access, Patchright Chromium, and an authenticated
+        LinkedIn browser profile. The server selects the active profile/runtime;
+        this tool has no environment selector. Response: {"url": str,
+        "sidebar_profiles": {section: ["/in/username/"]}}; absent sections are
+        omitted. Common failures include an invalid/private profile, missing or
+        Premium-only sidebar sections, expired login, rate limiting, browser
+        failure, or timeout. Follow with get_person_profile for selected paths.
+        Example input: {"linkedin_username": "williamhgates"}.
+
         Extracts profiles from "More profiles for you", "Explore premium profiles",
         and "People you may know" sidebar sections. Follows "Show all" links to
         return the full list from each section. Sections that redirect to
@@ -321,6 +382,21 @@ def register_person_tools(
     ) -> dict[str, Any]:
         """
         Get the authenticated user's own LinkedIn profile.
+
+        Use for the active account's profile and resolved public username. Do not use
+        get_person_profile with a guessed username when account identity is the
+        goal. Read-only: navigates and may expand profile content but does not
+        intentionally change account data.
+
+        Requires network access, Patchright Chromium, and an authenticated
+        LinkedIn browser profile. The server-selected active profile/runtime
+        determines which account is returned; this tool has no environment selector
+        or user selector. Response: {"url": str, "sections": {name: raw_text}} with
+        optional references, section_errors, and unknown_sections. Common failures
+        include missing/expired login, invalid section names, rate limiting,
+        browser setup failure, or timeout. Use the resolved username or references
+        in follow-up tools. Example input: {"sections": "contact_info,experience",
+        "max_scrolls": 10}.
 
         Navigates to /in/me/ and resolves the redirect to obtain the real
         username before scraping, so the url field in the result is the actual
