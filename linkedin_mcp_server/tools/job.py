@@ -38,6 +38,19 @@ def register_job_tools(
         """
         Get job details for a specific job posting on LinkedIn.
 
+        Use when a numeric LinkedIn job ID is known and full posting text is
+        needed. Do not use for discovery (use search_jobs). Read-only: navigates
+        the posting without intentionally changing account data or applying.
+
+        Requires network access, Patchright Chromium, and an authenticated
+        LinkedIn browser profile. The server selects the active profile/runtime;
+        this tool has no environment selector. Response: {"url": str,
+        "sections": {name: raw_text}} with optional references and
+        section_errors. Common failures include a malformed, expired, removed, or
+        inaccessible job ID, expired login, rate limiting, browser failure, or
+        timeout. Obtain IDs from search_jobs. Example input:
+        {"job_id": "4252026496"}.
+
         Args:
             job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
             ctx: FastMCP context for progress reporting
@@ -95,6 +108,20 @@ def register_job_tools(
 
         Returns job_ids that can be passed to get_job_details for full info.
 
+        Use for job discovery with LinkedIn's supported filters. Do not use when
+        a job ID is already known (use get_job_details). Read-only: submits and
+        paginates a search; easy_apply filters results but never applies.
+
+        Requires network access, Patchright Chromium, and an authenticated
+        LinkedIn browser profile. The server selects the active profile/runtime;
+        this tool has no environment selector. Response: {"url": str,
+        "sections": {name: raw_text}, "job_ids": [numeric_string]} with optional
+        references. Common failures include unsupported enum values, max_pages
+        outside 1-10, no matches, expired login, rate limiting, browser failure,
+        or timeout. Follow with get_job_details for selected IDs. Example input:
+        {"keywords": "data scientist", "location": "Remote", "max_pages": 2,
+        "date_posted": "past_week", "work_type": "remote", "sort_by": "date"}.
+
         Args:
             keywords: Search keywords (e.g., "software engineer", "data scientist")
             ctx: FastMCP context for progress reporting
@@ -149,3 +176,52 @@ def register_job_tools(
                 raise_tool_error(relogin_exc, "search_jobs")
         except Exception as e:
             raise_tool_error(e, "search_jobs")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Saved Jobs",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"job", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_saved_jobs(
+        ctx: Context,
+        max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        List job postings saved by the authenticated LinkedIn user.
+
+        Returns job_ids that can be passed to get_job_details for full info.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            max_pages: Maximum number of saved-jobs pages to load (1-10, default 3)
+
+        Returns:
+            Dict with url, sections (name -> raw text), job_ids (list of
+            numeric job ID strings usable with get_job_details), and optional references.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_saved_jobs"
+            )
+            logger.info("Fetching saved jobs (max_pages=%d)", max_pages)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading saved jobs"
+            )
+
+            result = await extractor.get_saved_jobs(max_pages=max_pages)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_saved_jobs")
+        except Exception as e:
+            raise_tool_error(e, "get_saved_jobs")  # NoReturn

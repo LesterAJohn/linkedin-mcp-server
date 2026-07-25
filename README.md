@@ -51,10 +51,19 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `search_companies` | Search for companies on LinkedIn by keywords | working |
 | `get_company_employees` | List employees at a company from the /people/ page, with optional keyword filter | working |
 | `search_jobs` | Search for jobs with keywords and location filters | working |
+| `get_saved_jobs` | List job postings saved by the authenticated user | working |
 | `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company | [#526](https://github.com/stickerdaniel/linkedin-mcp-server/issues/526) |
 | `get_job_details` | Get detailed information about a specific job posting | working |
 | `get_feed` | Get recent posts from the authenticated user's home feed | working |
 | `close_session` | Close browser session and clean up resources | working |
+
+Each MCP tool definition includes when to use it, alternatives, read/write risk,
+authentication and browser prerequisites, active-profile selection behavior,
+parameter constraints, response keys, common failures, recommended follow-up
+tools, and a valid JSON invocation example. `get_conversation` and
+`search_conversations` are marked as mutating reads because selecting inbox rows
+may mark messages as read. Outbound actions remain destructive and require an
+explicit confirmation workflow.
 
 Messaging conversation references returned by `get_inbox` and `search_conversations` now include row-level metadata captured from the inbox sidebar: `last_activity`, `preview`, `active`, `has_unread_marker`, `row_text`, and `read_state_confidence`.
 
