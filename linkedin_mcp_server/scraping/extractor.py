@@ -3730,11 +3730,20 @@ class LinkedInExtractor:
             {"limit": limit},
         )
 
+        normalized_rows: list[dict[str, Any]] = []
         for row in rows:
-            row["participant"] = self._strip_select_conversation_prefix(
-                str(row.get("aria_label", ""))
+            if isinstance(row, dict):
+                row_data = row
+            else:
+                row_data = {
+                    "aria_label": str(row) if row is not None else "",
+                    "read_state": "unknown",
+                }
+            row_data["participant"] = self._strip_select_conversation_prefix(
+                str(row_data.get("aria_label", ""))
             )
-        return rows
+            normalized_rows.append(row_data)
+        return normalized_rows
 
     async def _extract_conversation_thread_refs(
         self, limit: int | None, context: str, *, name_filter: str | None = None
