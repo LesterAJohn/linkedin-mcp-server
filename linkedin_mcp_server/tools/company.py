@@ -212,14 +212,14 @@ def register_company_tools(
         is required (use get_company_profile). Read-only: submits a LinkedIn
         search without intentionally changing account data.
 
-        Requires network access, Patchright Chromium, and an authenticated
-        LinkedIn browser profile. The server selects the active profile/runtime;
-        this tool has no environment selector. Response: {"url": str,
-        "sections": {"search_results": raw_text}} with optional company
-        references. Common failures include empty/overbroad queries, expired
-        login, rate limiting, browser failure, or timeout. Follow with
-        get_company_profile or get_company_employees using the selected slug.
-        Example input: {"keywords": "electric vehicles"}.
+        Requires network access, Patchright Chromium, an authenticated LinkedIn
+        browser profile, and an active profile/runtime selection. This tool has
+        no explicit environment selector. Response shape: {"url": str,
+        "sections": {"search_results": raw_text}, "references": [...]}.
+        Common failures include empty/overbroad queries, expired login, rate
+        limiting, browser failure, or timeout. Follow with get_company_profile
+        or get_company_employees using the selected slug. Example input:
+        {"keywords": "electric vehicles"}.
 
         Args:
             keywords: Search keywords (e.g., "fintech", "anthropic", "electric vehicles")

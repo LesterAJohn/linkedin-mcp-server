@@ -46,22 +46,26 @@ def register_messaging_tools(
         get_conversation). Read-only: scrolls the inbox without intentionally
         opening rows or changing message state.
 
-        Requires network access, Patchright Chromium, and an authenticated
-        LinkedIn profile with messaging access. The server selects the active
-        profile/runtime; this tool has no environment selector. Response:
-        {"url": str, "sections": {"inbox": raw_text}, "conversation_counts":
-        {"read": int, "unread": int}} with optional thread references. Common
-        failures include limit outside 1-50, restricted messaging access, expired
-        login, rate limiting, browser failure, or timeout. Follow with
-        get_conversation using a returned thread_id when available. Example input:
-        {"limit": 20}.
+        Requires network access, Patchright Chromium, an authenticated LinkedIn
+        profile with messaging access, and an active profile/runtime selection.
+        This tool has no explicit environment selector; it uses the server's
+        active profile/runtime. Response shape: {"url": str, "sections":
+        {"inbox": raw_text}, "conversation_counts": {"read": int, "unread": int,
+        "unknown": int, "total": int}, "conversations": [
+        {"participant": str, "aria_label": str, "read_state": "read"|"unread"|"unknown",
+        "thread_id": str|None, "thread_url": str|None}
+        ], "references": [...]}. Common failures include limit outside 1-50,
+        restricted messaging access, expired login, rate limiting, browser
+        failure, or timeout. Follow with get_conversation using a returned
+        thread_id when available. Example input: {"limit": 20}.
 
         Args:
             ctx: FastMCP context for progress reporting
             limit: Maximum number of conversations to load (1-50, default 20)
 
         Returns:
-            Dict with url, sections (inbox -> raw text), and optional references.
+            Dict with url, sections (inbox -> raw text), conversation_counts,
+            conversations, and optional references.
         """
         try:
             extractor = extractor or await get_ready_extractor(
@@ -111,23 +115,22 @@ def register_messaging_tools(
         opening or enumerating matching rows can mark messages as read. Prefer a
         known thread_id to minimize UI visits; this tool does not send messages.
 
-        Requires network access, Patchright Chromium, and an authenticated
-        LinkedIn profile with access to the conversation. The server selects the
-        active profile/runtime; this tool has no environment selector. Response:
-        {"url": str, "sections": {"conversation": raw_text}} with optional
-        references. Common failures include providing neither identifier, an
-        invalid/inaccessible thread, ambiguous participant matches, index outside
-        available matches, expired login, rate limiting, browser failure, or
-        timeout. Call search_conversations to enumerate thread IDs, then
-        reply_message only after user approval. Example input:
-        {"thread_id": "2-abc123"}.
+        Requires network access, Patchright Chromium, an authenticated LinkedIn
+        profile with access to the conversation, and an active profile/runtime
+        selection. This tool has no explicit environment selector. Response shape:
+        {"url": str, "sections": {"conversation": raw_text}, "references": [...]}. Common
+        failures include providing neither identifier, an invalid/inaccessible
+        thread, ambiguous participant matches, index outside available matches,
+        expired login, rate limiting, browser failure, or timeout. Call
+        search_conversations to enumerate thread IDs, then reply_message only
+        after user approval. Example input: {"thread_id": "2-abc123"}.
 
         When looked up by linkedin_username, resolution searches the messaging
-        inbox for the participant's display name and click-visits every
-        matching row to capture its thread ID — LinkedIn's sidebar has no
-        anchor hrefs or thread-id attributes, so this is the only available
-        path. Each visit selects the row in the LinkedIn UI and may mark it
-        as read. Pass thread_id directly to skip this enumeration.
+        inbox for the participant's display name and click-visits every matching
+        row to capture its thread ID — LinkedIn's sidebar has no anchor hrefs or
+        thread-id attributes, so this is the only available path. Each visit
+        selects the row in the LinkedIn UI and may mark it as read. Pass
+        thread_id directly to skip this enumeration.
 
         Args:
             ctx: FastMCP context for progress reporting
@@ -203,15 +206,14 @@ def register_messaging_tools(
         content. Low-risk mutating read: enumerating results selects rows in the
         LinkedIn UI and may mark conversations as read; keep limit small.
 
-        Requires network access, Patchright Chromium, and an authenticated
-        LinkedIn profile with messaging access. The server selects the active
-        profile/runtime; this tool has no environment selector. Response:
-        {"url": str, "sections": {"search_results": raw_text}} with optional
-        conversation references containing thread IDs. Common failures include an
-        empty/noisy query, limit outside 1-50, expired login, rate limiting,
-        browser failure, or timeout. Follow with get_conversation or, after user
-        confirmation, reply_message. Example input: {"keywords": "project atlas",
-        "limit": 10}.
+        Requires network access, Patchright Chromium, an authenticated LinkedIn
+        profile with messaging access, and an active profile/runtime selection.
+        This tool has no explicit environment selector. Response shape: {"url": str,
+        "sections": {"search_results": raw_text}, "references": [...]}. Common
+        failures include an empty/noisy query, limit outside 1-50, expired login,
+        rate limiting, browser failure, or timeout. Follow with get_conversation
+        or, after user confirmation, reply_message. Example input:
+        {"keywords": "project atlas", "limit": 10}.
 
         Args:
             keywords: Search keywords to filter conversations
