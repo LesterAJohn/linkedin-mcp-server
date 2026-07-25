@@ -112,13 +112,13 @@ def register_job_tools(
         a job ID is already known (use get_job_details). Read-only: submits and
         paginates a search; easy_apply filters results but never applies.
 
-        Requires network access, Patchright Chromium, and an authenticated
-        LinkedIn browser profile. The server selects the active profile/runtime;
-        this tool has no environment selector. Response: {"url": str,
-        "sections": {name: raw_text}, "job_ids": [numeric_string]} with optional
-        references. Common failures include unsupported enum values, max_pages
-        outside 1-10, no matches, expired login, rate limiting, browser failure,
-        or timeout. Follow with get_job_details for selected IDs. Example input:
+        Requires network access, Patchright Chromium, an authenticated LinkedIn
+        browser profile, and an active profile/runtime selection. This tool has
+        no explicit environment selector. Response shape: {"url": str,
+        "sections": {name: raw_text}, "job_ids": [numeric_string], "references": [...]}.
+        Common failures include unsupported enum values, max_pages outside 1-10,
+        no matches, expired login, rate limiting, browser failure, or timeout.
+        Follow with get_job_details for selected IDs. Example input:
         {"keywords": "data scientist", "location": "Remote", "max_pages": 2,
         "date_posted": "past_week", "work_type": "remote", "sort_by": "date"}.
 

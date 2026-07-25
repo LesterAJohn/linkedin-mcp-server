@@ -142,11 +142,11 @@ def register_person_tools(
         get_company_employees). Read-only: submits a LinkedIn search and does not
         intentionally change account data.
 
-        Requires network access, Patchright Chromium, and an authenticated
-        LinkedIn browser profile. The server selects the active profile/runtime;
-        this tool has no environment selector. Response: {"url": str,
-        "sections": {"search_results": raw_text}} with optional profile
-        references. Common failures include invalid network codes, a nonnumeric
+        Requires network access, Patchright Chromium, an authenticated LinkedIn
+        browser profile, and an active profile/runtime selection. This tool has
+        no explicit environment selector. Response shape: {"url": str,
+        "sections": {"search_results": raw_text}, "references": [...]}.
+        Common failures include invalid network codes, a nonnumeric
         current_company value producing unfiltered results, expired login, rate
         limiting, browser failure, or timeout. Call get_company_profile first to
         obtain a company URN, then get_person_profile for a selected result.
@@ -320,9 +320,9 @@ def register_person_tools(
         (use get_person_profile). Read-only: navigates recommendation views but
         does not intentionally change account data.
 
-        Requires network access, Patchright Chromium, and an authenticated
-        LinkedIn browser profile. The server selects the active profile/runtime;
-        this tool has no environment selector. Response: {"url": str,
+        Requires network access, Patchright Chromium, an authenticated LinkedIn
+        browser profile, and an active profile/runtime selection. This tool has
+        no explicit environment selector. Response shape: {"url": str,
         "sidebar_profiles": {section: ["/in/username/"]}}; absent sections are
         omitted. Common failures include an invalid/private profile, missing or
         Premium-only sidebar sections, expired login, rate limiting, browser
@@ -388,14 +388,15 @@ def register_person_tools(
         goal. Read-only: navigates and may expand profile content but does not
         intentionally change account data.
 
-        Requires network access, Patchright Chromium, and an authenticated
-        LinkedIn browser profile. The server-selected active profile/runtime
-        determines which account is returned; this tool has no environment selector
-        or user selector. Response: {"url": str, "sections": {name: raw_text}} with
-        optional references, section_errors, and unknown_sections. Common failures
-        include missing/expired login, invalid section names, rate limiting,
-        browser setup failure, or timeout. Use the resolved username or references
-        in follow-up tools. Example input: {"sections": "contact_info,experience",
+        Requires network access, Patchright Chromium, an authenticated LinkedIn
+        browser profile, and an active profile/runtime selection. The
+        server-selected active profile/runtime determines which account is
+        returned; this tool has no environment selector or user selector.
+        Response shape: {"url": str, "sections": {name: raw_text}} with optional
+        references, section_errors, and unknown_sections. Common failures include
+        missing/expired login, invalid section names, rate limiting, browser
+        setup failure, or timeout. Use the resolved username or references in
+        follow-up tools. Example input: {"sections": "contact_info,experience",
         "max_scrolls": 10}.
 
         Navigates to /in/me/ and resolves the redirect to obtain the real
