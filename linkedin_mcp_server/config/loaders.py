@@ -10,6 +10,7 @@ import math
 import os
 import sys
 from typing import Literal, cast
+from urllib.parse import unquote, urlsplit
 
 from dotenv import load_dotenv
 
@@ -58,6 +59,36 @@ def non_negative_float(value: str) -> float:
     return fvalue
 
 
+def credential_free_url(value: str) -> str:
+    """Argparse type for a proxy URL that carries no credentials.
+
+    A password in a command-line argument is readable by every user on the
+    machine through the process list, which is the whole reason there is no
+    ``--proxy-password`` flag. Accepting it inside ``--proxy-server`` would give
+    the secret back the same exposure, so it is refused here rather than split
+    out later. The value is never echoed, since it is the secret itself.
+    """
+    candidate = value if "://" in value else f"http://{value}"
+    try:
+        parsed = urlsplit(candidate)
+        # The encoded form counts too: "user%3Apass%40host" parses as a plain
+        # hostname, so the credentials would survive in the visible address.
+        has_credentials = bool(parsed.username or parsed.password) or (
+            "@" in unquote(parsed.hostname or "")
+        )
+    except ValueError:
+        # Leave the shape of the URL to BrowserConfig.validate(), which can
+        # explain the problem properly.
+        return value
+    if has_credentials:
+        raise argparse.ArgumentTypeError(
+            "must not contain credentials. Pass the bare scheme://host:port "
+            "here and supply the password via the PROXY_PASSWORD environment "
+            "variable, so it is not exposed in the process list."
+        )
+    return value
+
+
 class EnvironmentKeys:
     """Environment variable names used by the application."""
 
@@ -73,13 +104,21 @@ class EnvironmentKeys:
     SLOW_MO = "SLOW_MO"
     VIEWPORT = "VIEWPORT"
     CHROME_PATH = "CHROME_PATH"
+    PROXY_SERVER = "PROXY_SERVER"
+    PROXY_USERNAME = "PROXY_USERNAME"
+    PROXY_PASSWORD = "PROXY_PASSWORD"
+    PROXY_BYPASS = "PROXY_BYPASS"
     USER_DATA_DIR = "USER_DATA_DIR"
     TOOL_TIMEOUT = "TOOL_TIMEOUT"
     LOGIN_TIMEOUT = "LOGIN_TIMEOUT"
     LOGIN_INLINE_WAIT = "LOGIN_INLINE_WAIT"
+    BROWSER_WAIT = "BROWSER_WAIT"
+    BROWSER_MIN_HOLD = "BROWSER_MIN_HOLD"
+    BROWSER_IDLE_TIMEOUT = "BROWSER_IDLE_TIMEOUT"
     IMPORT_FROM_BROWSER = "IMPORT_FROM_BROWSER"
     AUTO_IMPORT_FROM_BROWSER = "AUTO_IMPORT_FROM_BROWSER"
     EAGER_FULL_CHROMIUM = "EAGER_FULL_CHROMIUM"
+    DAEMON_ENABLED = "DAEMON_ENABLED"
 
 
 def is_interactive_environment() -> bool:
@@ -186,6 +225,26 @@ def load_from_env(config: AppConfig) -> AppConfig:
             )
         config.browser.login_inline_wait_seconds = login_inline_wait_value
 
+    # Shared-browser coordination between concurrent server processes
+    # (validated and clamped in BrowserConfig.validate())
+    for env_key, attribute in (
+        (EnvironmentKeys.BROWSER_WAIT, "browser_wait_seconds"),
+        (EnvironmentKeys.BROWSER_MIN_HOLD, "browser_min_hold_seconds"),
+        (EnvironmentKeys.BROWSER_IDLE_TIMEOUT, "browser_idle_timeout_seconds"),
+    ):
+        raw = os.environ.get(env_key)
+        if not raw:
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            raise ConfigurationError(f"Invalid {env_key}: '{raw}'. Must be a number.")
+        if not (math.isfinite(value) and value >= 0):
+            raise ConfigurationError(
+                f"Invalid {env_key}: '{raw}'. Must be a non-negative finite number."
+            )
+        setattr(config.browser, attribute, value)
+
     # Custom user agent
     if user_agent_env := os.environ.get(EnvironmentKeys.USER_AGENT):
         config.browser.user_agent = user_agent_env
@@ -234,6 +293,21 @@ def load_from_env(config: AppConfig) -> AppConfig:
     if chrome_path_env := os.environ.get(EnvironmentKeys.CHROME_PATH):
         config.browser.chrome_path = chrome_path_env
 
+    # Browser proxy (validated and split in BrowserConfig.validate()). Unlike
+    # the CLI flag, PROXY_SERVER may carry the credentials a provider hands out:
+    # the environment is not world-readable the way a process argument list is.
+    if proxy_server_env := os.environ.get(EnvironmentKeys.PROXY_SERVER):
+        config.browser.proxy_server = proxy_server_env
+
+    if proxy_username_env := os.environ.get(EnvironmentKeys.PROXY_USERNAME):
+        config.browser.proxy_username = proxy_username_env
+
+    if proxy_password_env := os.environ.get(EnvironmentKeys.PROXY_PASSWORD):
+        config.browser.proxy_password = proxy_password_env
+
+    if proxy_bypass_env := os.environ.get(EnvironmentKeys.PROXY_BYPASS):
+        config.browser.proxy_bypass = proxy_bypass_env
+
     # Import a LinkedIn session from a locally logged-in browser (validated in
     # ServerConfig.validate())
     if import_browser_env := os.environ.get(EnvironmentKeys.IMPORT_FROM_BROWSER):
@@ -256,6 +330,14 @@ def load_from_env(config: AppConfig) -> AppConfig:
             config.browser.eager_full_chromium = False
         elif eager_full_value in TRUTHY_VALUES:
             config.browser.eager_full_chromium = True
+
+    # Share one browser-owning process across stdio clients.
+    if daemon_env := os.environ.get(EnvironmentKeys.DAEMON_ENABLED):
+        daemon_value = _normalize_env(daemon_env)
+        if daemon_value in FALSY_VALUES:
+            config.server.daemon_enabled = False
+        elif daemon_value in TRUTHY_VALUES:
+            config.server.daemon_enabled = True
 
     return config
 
@@ -371,6 +453,37 @@ def load_from_args(config: AppConfig) -> AppConfig:
             "in seconds (default: 25, max 45; 0 = return immediately)"
         ),
     )
+    parser.add_argument(
+        "--browser-wait",
+        type=non_negative_float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "How long to wait for another server process to hand over the shared "
+            "browser, in seconds (default: 25, max 45; 0 = report busy at once)"
+        ),
+    )
+    parser.add_argument(
+        "--browser-min-hold",
+        type=non_negative_float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Shortest time this process keeps the shared browser before honouring "
+            "a handoff request, in seconds (default: 20, clamped below "
+            "--browser-wait; 0 = hand over after every tool call)"
+        ),
+    )
+    parser.add_argument(
+        "--browser-idle-timeout",
+        type=non_negative_float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Close an idle browser and release the shared profile after this many "
+            "seconds without a tool call (default: 600; 0 = keep it open)"
+        ),
+    )
 
     parser.add_argument(
         "--chrome-path",
@@ -378,6 +491,38 @@ def load_from_args(config: AppConfig) -> AppConfig:
         default=None,
         metavar="PATH",
         help="Path to Chrome/Chromium executable (for custom browser installations)",
+    )
+
+    parser.add_argument(
+        "--proxy-server",
+        type=credential_free_url,
+        default=None,
+        metavar="URL",
+        help=(
+            "Route the browser through a proxy, as scheme://host:port "
+            "(http, https, socks4 or socks5). Chromium cannot authenticate to "
+            "a SOCKS proxy, so credentials require an http(s) endpoint"
+        ),
+    )
+
+    parser.add_argument(
+        "--proxy-username",
+        type=str,
+        default=None,
+        metavar="USER",
+        help=(
+            "Username for the proxy. Visible in the process list like any "
+            "argument, which is acceptable because it grants nothing without "
+            "the password; that one has no flag on purpose, set PROXY_PASSWORD"
+        ),
+    )
+
+    parser.add_argument(
+        "--proxy-bypass",
+        type=str,
+        default=None,
+        metavar="HOSTS",
+        help="Comma-separated hosts to reach directly instead of via the proxy",
     )
 
     # Session management
@@ -468,6 +613,25 @@ def load_from_args(config: AppConfig) -> AppConfig:
         ),
     )
 
+    daemon_group = parser.add_mutually_exclusive_group()
+    daemon_group.add_argument(
+        "--daemon",
+        dest="daemon_enabled",
+        action="store_true",
+        default=None,
+        help=(
+            "Serve every stdio client from one browser-owning process instead "
+            "of giving each its own (experimental)."
+        ),
+    )
+    daemon_group.add_argument(
+        "--no-daemon",
+        dest="daemon_enabled",
+        action="store_false",
+        default=None,
+        help="Give every stdio client its own browser (default; overrides DAEMON_ENABLED=true).",
+    )
+
     args = parser.parse_args()
 
     # Update configuration with parsed arguments
@@ -524,8 +688,27 @@ def load_from_args(config: AppConfig) -> AppConfig:
     if args.login_inline_wait is not None:
         config.browser.login_inline_wait_seconds = args.login_inline_wait
 
+    if args.browser_wait is not None:
+        config.browser.browser_wait_seconds = args.browser_wait
+
+    if args.browser_min_hold is not None:
+        config.browser.browser_min_hold_seconds = args.browser_min_hold
+
+    if args.browser_idle_timeout is not None:
+        config.browser.browser_idle_timeout_seconds = args.browser_idle_timeout
+
     if args.chrome_path:
         config.browser.chrome_path = args.chrome_path
+
+    # Proxy (validated and normalized in BrowserConfig.validate())
+    if args.proxy_server:
+        config.browser.proxy_server = args.proxy_server
+
+    if args.proxy_username:
+        config.browser.proxy_username = args.proxy_username
+
+    if args.proxy_bypass:
+        config.browser.proxy_bypass = args.proxy_bypass
 
     # Session management
     if args.login:
@@ -549,6 +732,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.eager_full_chromium is not None:
         config.browser.eager_full_chromium = args.eager_full_chromium
+
+    if args.daemon_enabled is not None:
+        config.server.daemon_enabled = args.daemon_enabled
 
     return config
 

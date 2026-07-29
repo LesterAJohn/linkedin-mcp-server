@@ -8,6 +8,7 @@ from linkedin_mcp_server.callbacks import ProgressCallback
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
+    ProxyConnectionError,
 )
 from linkedin_mcp_server.scraping.connection import (
     ActionSignals,
@@ -16,6 +17,7 @@ from linkedin_mcp_server.scraping.connection import (
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
+    _CONTENT_DATE_POSTED_MAP,
     _RATE_LIMITED_MSG,
     _build_feed_references,
     _truncate_linkedin_noise,
@@ -3005,6 +3007,149 @@ class TestSearchPeople:
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
 
 
+class TestBuildContentSearchUrl:
+    """Tests for _build_content_search_url URL construction."""
+
+    def test_basic_keywords(self):
+        url = LinkedInExtractor._build_content_search_url("Buscamos Unity")
+        assert url == (
+            "https://www.linkedin.com/search/results/content/"
+            "?keywords=Buscamos+Unity&origin=FACETED_SEARCH"
+        )
+
+    def test_date_posted_past_week(self):
+        url = LinkedInExtractor._build_content_search_url(
+            "Buscamos Unity", date_posted="past-week"
+        )
+        assert "datePosted=%5B%22past-week%22%5D" in url
+
+    def test_date_posted_alias_normalized(self):
+        url = LinkedInExtractor._build_content_search_url(
+            "python", date_posted="past_24_hours"
+        )
+        assert "datePosted=%5B%22past-24h%22%5D" in url
+
+    def test_every_accepted_date_posted_reaches_linkedin_as_a_real_token(self):
+        """LinkedIn ignores an unrecognized token instead of rejecting it, so
+        an accepted value that never maps to one of its three would return
+        unfiltered results while looking filtered."""
+        for accepted, expected in _CONTENT_DATE_POSTED_MAP.items():
+            url = LinkedInExtractor._build_content_search_url(
+                "python", date_posted=accepted
+            )
+            assert expected in ("past-24h", "past-week", "past-month")
+            assert f"%22{expected}%22" in url
+
+    def test_no_date_posted_omits_facet(self):
+        url = LinkedInExtractor._build_content_search_url("python")
+        assert "datePosted" not in url
+
+    def test_whitespace_date_posted_omits_facet(self):
+        # Whitespace-only date_posted must be ignored, not appended as an
+        # invalid facet token (regression guard).
+        url = LinkedInExtractor._build_content_search_url("python", date_posted="   ")
+        assert "datePosted" not in url
+
+
+@pytest.mark.asyncio
+class TestSearchPosts:
+    async def test_returns_results_and_url(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("We're hiring a Unity dev"),
+        ) as mock_extract:
+            result = await extractor.search_posts("Buscamos Unity")
+
+        assert "/search/results/content/" in result["url"]
+        assert "origin=FACETED_SEARCH" in result["url"]
+        assert result["sections"]["search_results"] == "We're hiring a Unity dev"
+        # max_pages default (3) -> 15 scrolls
+        mock_extract.assert_awaited_once_with(
+            ANY, section_name="search_results", max_scrolls=15
+        )
+
+    async def test_date_posted_in_url(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("post"),
+        ):
+            result = await extractor.search_posts(
+                "Buscamos Unity", date_posted="past-week"
+            )
+
+        assert "datePosted=%5B%22past-week%22%5D" in result["url"]
+
+    async def test_max_pages_controls_scroll_depth(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("post"),
+        ) as mock_extract:
+            await extractor.search_posts("python", max_pages=2)
+
+        mock_extract.assert_awaited_once_with(
+            ANY, section_name="search_results", max_scrolls=10
+        )
+
+    async def test_invalid_date_posted_raises(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(ValueError, match="Invalid date_posted"):
+            await extractor.search_posts("python", date_posted="last-year")
+
+    async def test_empty_results_omit_optional_keys(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(""),
+        ):
+            result = await extractor.search_posts("nothing matches this query")
+
+        assert result["sections"] == {}
+        assert "references" not in result
+        assert "section_errors" not in result
+
+    async def test_rate_limited_surfaces_section_error(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(_RATE_LIMITED_MSG),
+        ):
+            result = await extractor.search_posts("python")
+
+        assert result["sections"] == {}
+        assert result["section_errors"]["search_results"]["error_type"] == "rate_limit"
+
+    async def test_navigation_error_surfaces_section_error(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(
+                "", error={"error_type": "navigation_error", "error_message": "timeout"}
+            ),
+        ):
+            result = await extractor.search_posts("python")
+
+        assert result["sections"] == {}
+        assert result["section_errors"]["search_results"] == {
+            "error_type": "navigation_error",
+            "error_message": "timeout",
+        }
+
+
 class TestStripLinkedInNoise:
     def test_strips_footer(self):
         text = "Bill Gates\nChair, Gates Foundation\n\nAbout\nAccessibility\nTalent Solutions\nCareers"
@@ -3249,6 +3394,83 @@ class TestActivityFeedExtraction:
         assert kwargs["pause_time"] == 1.0
         assert kwargs["max_scrolls"] == 10
         assert len(result.text) > 200
+
+    async def test_company_posts_page_waits_for_content_and_uses_slow_scroll(
+        self, mock_page
+    ):
+        """Company posts URLs get the same lazy-load wait and scroll budget
+        as person activity pages, even though they lack /recent-activity/."""
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Post content " * 50,
+                "references": [],
+            }
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as mock_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor._extract_page_once(
+                "https://www.linkedin.com/company/microsoft/posts/",
+                section_name="posts",
+            )
+
+        mock_page.wait_for_function.assert_awaited_once()
+        mock_scroll.assert_awaited_once()
+        _, kwargs = mock_scroll.call_args
+        assert kwargs["pause_time"] == 1.0
+        assert kwargs["max_scrolls"] == 10
+        assert len(result.text) > 200
+
+    async def test_company_posts_page_with_query_string_still_waits(self, mock_page):
+        """The lazy-load branch keys off the parsed path, so a company posts
+        url carrying a query string is not mistaken for a static page."""
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Post content " * 50,
+                "references": [],
+            }
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as mock_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            await extractor._extract_page_once(
+                "https://www.linkedin.com/company/microsoft/posts/?viewAsMember=true",
+                section_name="posts",
+            )
+
+        mock_page.wait_for_function.assert_awaited_once()
+        _, kwargs = mock_scroll.call_args
+        assert kwargs["max_scrolls"] == 10
 
     async def test_non_activity_non_details_page_skips_wait_and_uses_fast_scroll(
         self, mock_page
@@ -5679,3 +5901,148 @@ class TestBuildFeedReferences:
             "/posts/alice_x-ugcPost-1-xx",
         ]
         assert kinds == {"feed_post"}
+
+
+class TestProxyNavigationFailures:
+    """A proxy outage during an ordinary tool call is reported as itself."""
+
+    async def test_proxy_error_is_raised_instead_of_a_scraping_failure(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.goto = AsyncMock(
+            side_effect=Exception("net::ERR_PROXY_CONNECTION_FAILED at …")
+        )
+
+        with pytest.raises(ProxyConnectionError):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+    async def test_proxy_error_is_converted_before_it_reaches_a_trace(self, mock_page):
+        # The trace records the raw exception text, which for a proxy failure
+        # can quote the proxy URL and put a password into trace.jsonl.
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.goto = AsyncMock(
+            side_effect=Exception("net::ERR_TUNNEL_CONNECTION_FAILED")
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.record_page_trace",
+                new_callable=AsyncMock,
+            ) as mock_trace,
+            pytest.raises(ProxyConnectionError),
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        recorded = [call.args[1] for call in mock_trace.await_args_list]
+        assert "extractor-navigation-error" not in recorded
+
+    async def test_ordinary_navigation_failure_is_unaffected(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_ABORTED"))
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(Exception) as excinfo,
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert not isinstance(excinfo.value, ProxyConnectionError)
+
+
+class TestNavigationFailureLogRedaction:
+    """The navigation-failure log must not carry proxy credentials.
+
+    It reaches the log even for errors the marker check does not recognise as
+    proxy faults, and that log is what users paste into issue reports.
+    """
+
+    async def test_credentials_are_redacted_from_the_log(
+        self, mock_page, monkeypatch, caplog
+    ):
+        import logging
+
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        config = AppConfig()
+        config.browser.proxy_server = "http://gate.example:7000"
+        config.browser.proxy_username = "acctzone9"
+        config.browser.proxy_password = "s3cr3t"
+        monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+
+        extractor = LinkedInExtractor(mock_page)
+        # No proxy marker, so it is not converted and reaches the logger.
+        mock_page.goto = AsyncMock(
+            side_effect=Exception(
+                "failed via http://acctzone9:s3cr3t@gate.example:7000"
+            )
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            caplog.at_level(logging.WARNING),
+            pytest.raises(Exception),
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert "s3cr3t" not in caplog.text
+        assert "acctzone9" not in caplog.text
+
+
+class TestNavigationFailureCrossesTheToolBoundaryClean:
+    """The re-raised exception itself must be credential-free.
+
+    Redacting the extractor's own trace and log is not enough: everything
+    downstream logs the exception too, starting with the catch-all in
+    error_handler and FastMCP's handler above it.
+    """
+
+    async def test_reraised_exception_carries_no_credentials(
+        self, mock_page, monkeypatch
+    ):
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        config = AppConfig()
+        config.browser.proxy_server = "http://gate.example:7000"
+        config.browser.proxy_username = "acctzone9"
+        config.browser.proxy_password = "s3cr3t"
+        monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.goto = AsyncMock(
+            side_effect=Exception(
+                "failed via http://acctzone9:s3cr3t@gate.example:7000"
+            )
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(Exception) as excinfo,
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert "s3cr3t" not in str(excinfo.value)
+        assert "acctzone9" not in str(excinfo.value)
+        # The raw error must not survive as a cause either: the handlers
+        # downstream print the whole chain.
+        assert excinfo.value.__cause__ is None

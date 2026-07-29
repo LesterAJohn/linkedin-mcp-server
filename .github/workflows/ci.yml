@@ -4,8 +4,10 @@ name: CI
 on:
   push:
     branches: [main]
+  # Every pull request, not only those targeting main. A stacked pull request
+  # is based on the branch below it, so filtering by base branch skipped CI
+  # entirely for the stacks this repository's workflow produces.
   pull_request:
-    branches: [main]
 
 jobs:
   lint-and-check:
@@ -43,5 +45,33 @@ jobs:
 
       - name: Run tests
         run: uv run pytest --cov --cov-report=term-missing -n auto -v -s
+
+      - run: uv cache prune --ci
+
+  # Everything here coordinates or protects state through the operating system
+  # rather than through Python, so each platform runs a different
+  # implementation: the lease locks with flock or with LockFileEx, and
+  # owner-only storage is a permission bit or an access control list. The
+  # Ubuntu job above executes neither Windows path. Serial by choice: the lease
+  # tests spawn their own competing processes, and xdist would only add
+  # scheduling noise on top of that.
+  platform-behaviour:
+    name: Platform behaviour (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+
+      - run: uv sync --group dev
+
+      - name: Run platform behaviour tests
+        run: uv run pytest tests/test_profile_lease.py tests/test_profile_lease_integration.py tests/test_private_state.py tests/test_daemon_lock.py
 
       - run: uv cache prune --ci
