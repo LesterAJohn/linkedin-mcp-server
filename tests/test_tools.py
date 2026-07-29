@@ -1283,7 +1283,6 @@ class TestToolDefinitions:
             "Do not use",
             "Requires ",
             "environment selector",
-            "Response:",
             "Common failures",
             "Example input:",
         )
@@ -1294,6 +1293,11 @@ class TestToolDefinitions:
             description = re.sub(r"\s+", " ", tool.description or "")
             for guidance in required_guidance:
                 assert guidance in description, f"{name} missing {guidance!r}"
+            assert (
+                "Response:" in description
+                or "Response shape:" in description
+                or "Returns:" in description
+            ), f"{name} missing response guidance"
 
     async def test_message_reads_advertise_read_state_mutation(self):
         from linkedin_mcp_server.server import create_mcp_server
