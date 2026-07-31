@@ -272,6 +272,7 @@ def register_messaging_tools(
         confirm_send: bool,
         ctx: Context,
         profile_urn: str | None = None,
+        attachment_paths: list[str] | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -293,11 +294,12 @@ def register_messaging_tools(
         selector. Response: {"url": str, "status": str, "message": str,
         "recipient_selected": bool, "sent": bool}. Common failures include an
         unavailable Message action, recipient mismatch, invalid profile URN,
-        unavailable composer, expired login, rate limiting, browser failure, or
+        unavailable composer, missing/invalid attachment paths, attachment
+        upload failure, expired login, rate limiting, browser failure, or
         timeout. Call get_person_profile to verify username/profile_urn and
         search_conversations afterward if inbox display lags. Example input:
         {"linkedin_username": "stickerdaniel", "message": "Hello!",
-        "confirm_send": false}.
+        "confirm_send": false, "attachment_paths": ["/tmp/spec.pdf"]}.
 
         Args:
             linkedin_username: LinkedIn username of the recipient
@@ -309,6 +311,8 @@ def register_messaging_tools(
                 lookup and is more reliable when available. Obtain via
                 get_person_profile. Note: inbox may not always show all
                 messages; use search_conversations as a fallback.
+            attachment_paths: Optional absolute or relative file paths to upload
+                as real LinkedIn message attachments before sending.
 
         Returns:
             Dict with url, status, message, recipient_selected, and sent.
@@ -330,6 +334,7 @@ def register_messaging_tools(
                 message,
                 confirm_send=confirm_send,
                 profile_urn=profile_urn,
+                attachment_paths=attachment_paths,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
@@ -356,6 +361,7 @@ def register_messaging_tools(
         message: str,
         confirm_send: bool,
         ctx: Context,
+        attachment_paths: list[str] | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """Reply in an existing conversation identified by thread_id.
@@ -375,16 +381,20 @@ def register_messaging_tools(
         server selects the active profile/runtime; this tool has no environment
         selector. Response: {"url": str, "status": str, "message": str,
         "recipient_selected": bool, "sent": bool}. Common failures include an
-        empty/invalid thread ID, thread mismatch, unavailable composer, expired
+        empty/invalid thread ID, thread mismatch, unavailable composer,
+        missing/invalid attachment paths, attachment upload failure, expired
         login, rate limiting, browser failure, or timeout. Use get_conversation to
         verify context before replying. Example input: {"thread_id": "2-abc123",
-        "message": "Thanks, I will follow up tomorrow.", "confirm_send": false}.
+        "message": "Thanks, I will follow up tomorrow.", "confirm_send": false,
+        "attachment_paths": ["/tmp/portfolio.pdf"]}.
 
         Args:
             thread_id: LinkedIn messaging thread ID (required)
             message: The reply text to send
             confirm_send: Must be True to send the reply
             ctx: FastMCP context for progress reporting
+            attachment_paths: Optional absolute or relative file paths to upload
+                as real LinkedIn message attachments before sending.
 
         Returns:
             Dict with url, status, message, recipient_selected, and sent.
@@ -405,6 +415,7 @@ def register_messaging_tools(
                 thread_id,
                 message,
                 confirm_send=confirm_send,
+                attachment_paths=attachment_paths,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")

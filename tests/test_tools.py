@@ -831,7 +831,11 @@ class TestMessagingTools:
         assert result["status"] == "sent"
         assert result["sent"] is True
         mock_extractor.send_message.assert_awaited_once_with(
-            "testuser", "Hello!", confirm_send=True, profile_urn=None
+            "testuser",
+            "Hello!",
+            confirm_send=True,
+            profile_urn=None,
+            attachment_paths=None,
         )
 
     async def test_send_message_with_profile_urn(self, mock_context):
@@ -861,7 +865,46 @@ class TestMessagingTools:
 
         assert result["status"] == "sent"
         mock_extractor.send_message.assert_awaited_once_with(
-            "testuser", "Hello!", confirm_send=True, profile_urn="ACoAAB1IelEB"
+            "testuser",
+            "Hello!",
+            confirm_send=True,
+            profile_urn="ACoAAB1IelEB",
+            attachment_paths=None,
+        )
+
+    async def test_send_message_with_attachments(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/abc123/",
+            "status": "sent",
+            "message": "Message sent.",
+            "recipient_selected": True,
+            "sent": True,
+            "attachments": ["brief.pdf", "portfolio.zip"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "send_message")
+        result = await tool_fn(
+            "testuser",
+            "Hello!",
+            True,
+            mock_context,
+            attachment_paths=["/tmp/brief.pdf", "/tmp/portfolio.zip"],
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "sent"
+        mock_extractor.send_message.assert_awaited_once_with(
+            "testuser",
+            "Hello!",
+            confirm_send=True,
+            profile_urn=None,
+            attachment_paths=["/tmp/brief.pdf", "/tmp/portfolio.zip"],
         )
 
     async def test_send_message_error(self, mock_context):
@@ -914,7 +957,44 @@ class TestMessagingTools:
         assert result["status"] == "sent"
         assert result["sent"] is True
         mock_extractor.reply_message.assert_awaited_once_with(
-            "2-abc123", "Follow-up", confirm_send=True
+            "2-abc123",
+            "Follow-up",
+            confirm_send=True,
+            attachment_paths=None,
+        )
+
+    async def test_reply_message_with_attachments(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/abc123/",
+            "status": "sent",
+            "message": "Message sent.",
+            "recipient_selected": True,
+            "sent": True,
+            "attachments": ["proposal.pdf"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "reply_message")
+        result = await tool_fn(
+            "2-abc123",
+            "Follow-up",
+            True,
+            mock_context,
+            attachment_paths=["/tmp/proposal.pdf"],
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "sent"
+        mock_extractor.reply_message.assert_awaited_once_with(
+            "2-abc123",
+            "Follow-up",
+            confirm_send=True,
+            attachment_paths=["/tmp/proposal.pdf"],
         )
 
     async def test_reply_message_error(self, mock_context):

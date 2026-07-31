@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 import json
 import logging
+from pathlib import Path
 import re
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
@@ -158,6 +159,12 @@ _MESSAGING_CLOSE_SELECTOR = (
     'button[aria-label="Dismiss"], '
     'button[aria-label*="Dismiss"], '
     'button[aria-label*="Close"]'
+)
+_MESSAGING_ATTACHMENT_INPUT_SELECTOR = (
+    "main input[type='file'], "
+    "[role='dialog'] input[type='file'], "
+    "dialog input[type='file'], "
+    "input[type='file']"
 )
 
 # Shared JS function that walks up from any /messaging/compose/ anchor
@@ -739,15 +746,78 @@ class LinkedInExtractor:
         *,
         recipient_selected: bool = False,
         sent: bool = False,
+        attachments: list[str] | None = None,
     ) -> dict[str, Any]:
         """Build a structured response for the send_message tool."""
-        return {
+        result: dict[str, Any] = {
             "url": url,
             "status": status,
             "message": message,
             "recipient_selected": recipient_selected,
             "sent": sent,
         }
+        if attachments is not None:
+            result["attachments"] = attachments
+        return result
+
+    @staticmethod
+    def _normalize_attachment_paths(attachment_paths: list[str] | None) -> list[str]:
+        """Validate and normalize message attachment file paths.
+
+        Returns an ordered, de-duplicated list of absolute file paths.
+        """
+        if not attachment_paths:
+            return []
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+
+        for raw_path in attachment_paths:
+            candidate = str(raw_path).strip()
+            if not candidate:
+                raise LinkedInScraperException(
+                    "attachment_paths must not contain empty values"
+                )
+
+            expanded = Path(candidate).expanduser()
+            try:
+                resolved = expanded.resolve(strict=True)
+            except FileNotFoundError as exc:
+                raise LinkedInScraperException(
+                    f"Attachment file not found: {expanded}"
+                ) from exc
+
+            if not resolved.is_file():
+                raise LinkedInScraperException(
+                    f"Attachment path is not a file: {resolved}"
+                )
+
+            resolved_str = str(resolved)
+            if resolved_str in seen:
+                continue
+            seen.add(resolved_str)
+            normalized.append(resolved_str)
+
+        return normalized
+
+    async def _upload_message_attachments(self, attachment_paths: list[str]) -> bool:
+        """Upload files through LinkedIn's message attachment input.
+
+        Returns True when file paths were handed to a file input successfully.
+        """
+        if not attachment_paths:
+            return True
+
+        input_locator = self._page.locator(_MESSAGING_ATTACHMENT_INPUT_SELECTOR)
+        try:
+            if await input_locator.count() == 0:
+                return False
+            await input_locator.first.set_input_files(attachment_paths)
+            await asyncio.sleep(0.75)
+            return True
+        except Exception:
+            logger.debug("LinkedIn attachment upload failed", exc_info=True)
+            return False
 
     async def _log_navigation_failure(
         self,
@@ -4222,6 +4292,7 @@ class LinkedInExtractor:
         *,
         confirm_send: bool,
         profile_urn: str | None = None,
+        attachment_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Send a message to a LinkedIn user with explicit confirmation gating.
 
@@ -4231,7 +4302,10 @@ class LinkedInExtractor:
             confirm_send: Must be True to actually send (False does a dry run).
             profile_urn: Optional profile URN (e.g. ACoAAB...) to construct the
                 compose URL directly, bypassing the Message-button lookup.
+            attachment_paths: Optional file paths to upload as real message
+                attachments before sending.
         """
+        normalized_attachments = self._normalize_attachment_paths(attachment_paths)
         profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
@@ -4328,6 +4402,7 @@ class LinkedInExtractor:
             message,
             confirm_send=confirm_send,
             recipient_selected=recipient_selected,
+            attachment_paths=normalized_attachments,
         )
 
     async def reply_message(
@@ -4336,12 +4411,14 @@ class LinkedInExtractor:
         message: str,
         *,
         confirm_send: bool,
+        attachment_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Reply inside an existing LinkedIn conversation thread.
 
         Requires a concrete ``thread_id`` so this path never enters the
         recipient-picker compose flow that can start a new thread.
         """
+        normalized_attachments = self._normalize_attachment_paths(attachment_paths)
         clean_thread_id = thread_id.strip()
         if not clean_thread_id:
             raise LinkedInScraperException("thread_id must be a non-empty string")
@@ -4380,6 +4457,7 @@ class LinkedInExtractor:
             message,
             confirm_send=confirm_send,
             recipient_selected=True,
+            attachment_paths=normalized_attachments,
         )
 
     async def _send_message_from_open_composer(
@@ -4388,8 +4466,12 @@ class LinkedInExtractor:
         *,
         confirm_send: bool,
         recipient_selected: bool,
+        attachment_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Send (or dry-run) from an already-open LinkedIn message composer."""
+
+        normalized_attachments = attachment_paths or []
+        attachment_names = [Path(path).name for path in normalized_attachments]
 
         compose_box = await self._resolve_message_compose_box()
         if compose_box is None:
@@ -4399,16 +4481,35 @@ class LinkedInExtractor:
                 "composer_unavailable",
                 "LinkedIn did not expose a usable message composer.",
                 recipient_selected=recipient_selected,
+                attachments=attachment_names or None,
             )
 
         if not confirm_send:
             await self._dismiss_message_ui()
+            confirmation_message = "Set confirm_send=true to send the message."
+            if attachment_names:
+                confirmation_message = (
+                    "Set confirm_send=true to upload attachments and send the message."
+                )
             return self._message_action_result(
                 self._page.url,
                 "confirmation_required",
-                "Set confirm_send=true to send the message.",
+                confirmation_message,
                 recipient_selected=recipient_selected,
+                attachments=attachment_names,
             )
+
+        if normalized_attachments:
+            uploaded = await self._upload_message_attachments(normalized_attachments)
+            if not uploaded:
+                await self._dismiss_message_ui()
+                return self._message_action_result(
+                    self._page.url,
+                    "attachment_upload_failed",
+                    "LinkedIn did not accept the provided attachment files.",
+                    recipient_selected=recipient_selected,
+                    attachments=attachment_names,
+                )
 
         # patchright quirk: compose_box.click() and press_sequentially() use
         # actionability checks internally and hit the same wait_for timeout.
@@ -4438,6 +4539,7 @@ class LinkedInExtractor:
                 "compose_interact_failed",
                 "Could not focus compose box via JavaScript.",
                 recipient_selected=recipient_selected,
+                attachments=attachment_names or None,
             )
         await asyncio.sleep(0.1)
         await self._page.keyboard.type(message, delay=15)
@@ -4472,6 +4574,7 @@ class LinkedInExtractor:
                 "send_unavailable",
                 "LinkedIn did not confirm that the message was sent.",
                 recipient_selected=recipient_selected,
+                attachments=attachment_names or None,
             )
 
         return self._message_action_result(
@@ -4480,6 +4583,7 @@ class LinkedInExtractor:
             "Message sent.",
             recipient_selected=recipient_selected,
             sent=True,
+            attachments=attachment_names or None,
         )
 
     async def _extract_root_content(

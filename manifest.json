@@ -109,11 +109,11 @@
     },
     {
       "name": "send_message",
-      "description": "Send a message to a LinkedIn user with explicit confirmation and optional profile URN support"
+      "description": "Send a message to a LinkedIn user with explicit confirmation, optional profile URN support, and optional real file attachments"
     },
     {
       "name": "reply_message",
-      "description": "Reply in an existing LinkedIn conversation thread using required thread_id with explicit confirmation"
+      "description": "Reply in an existing LinkedIn conversation thread using required thread_id with explicit confirmation and optional real file attachments"
     },
     {
       "name": "get_feed",

@@ -5584,6 +5584,157 @@ class TestReplyMessage:
         mock_keyboard.type.assert_awaited_once_with("Hello in-thread", delay=15)
 
 
+class TestMessageAttachments:
+    async def test_send_message_rejects_missing_attachment_path(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+
+        with pytest.raises(LinkedInScraperException, match="Attachment file not found"):
+            await extractor.send_message(
+                "testuser",
+                "Hello!",
+                confirm_send=True,
+                attachment_paths=["/tmp/definitely-missing-file-1234.txt"],
+            )
+
+    async def test_send_message_returns_attachment_upload_failed(self, mock_page, tmp_path):
+        extractor = LinkedInExtractor(mock_page)
+        attachment_path = tmp_path / "brief.pdf"
+        attachment_path.write_text("pdf")
+
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_read_profile_display_name",
+                new_callable=AsyncMock,
+                return_value="Test User",
+            ),
+            patch.object(
+                extractor,
+                "_resolve_message_compose_href",
+                new_callable=AsyncMock,
+                return_value="https://www.linkedin.com/messaging/compose/?recipient=ACoAAB",
+            ),
+            patch.object(
+                extractor,
+                "_wait_for_message_surface",
+                new_callable=AsyncMock,
+                return_value="composer",
+            ),
+            patch.object(
+                extractor,
+                "_resolve_message_compose_box",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                extractor,
+                "_compose_page_matches_recipient",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_upload_message_attachments",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as upload_mock,
+            patch.object(
+                extractor,
+                "_dismiss_message_ui",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.send_message(
+                "testuser",
+                "Hello!",
+                confirm_send=True,
+                attachment_paths=[str(attachment_path)],
+            )
+
+        assert result["status"] == "attachment_upload_failed"
+        assert result["sent"] is False
+        assert result["attachments"] == ["brief.pdf"]
+        upload_mock.assert_awaited_once_with([str(attachment_path.resolve())])
+
+    async def test_reply_message_uploads_attachments_before_send(
+        self, mock_page, tmp_path
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/messaging/thread/2-abc123/"
+        attachment_path = tmp_path / "proposal.pdf"
+        attachment_path.write_text("proposal")
+
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+        mock_page.evaluate = AsyncMock(side_effect=[True, True])
+
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_wait_for_message_surface",
+                new_callable=AsyncMock,
+                return_value="composer",
+            ),
+            patch.object(
+                extractor,
+                "_resolve_message_compose_box",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                extractor,
+                "_upload_message_attachments",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as upload_mock,
+            patch.object(
+                extractor,
+                "_message_text_visible",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_dismiss_message_ui",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.reply_message(
+                "2-abc123",
+                "Attached proposal",
+                confirm_send=True,
+                attachment_paths=[str(attachment_path)],
+            )
+
+        assert result["status"] == "sent"
+        assert result["attachments"] == ["proposal.pdf"]
+        upload_mock.assert_awaited_once_with([str(attachment_path.resolve())])
+
+
 class TestResolveMessageComposeBox:
     async def test_returns_locator_when_count_positive(self, mock_page):
         """_resolve_message_compose_box returns locator.last when count() > 0."""

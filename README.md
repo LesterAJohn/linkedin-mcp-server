@@ -44,8 +44,8 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `get_inbox` | List recent conversations from the LinkedIn messaging inbox, including structured `conversation_counts`, best-effort read/unread state, and conversation references with `last_activity`, `preview`, `active`, `has_unread_marker`, `row_text`, and `read_state_confidence`; visible rows without unread markers are counted as read | working |
 | `get_conversation` | Read a specific messaging conversation by username or thread ID | working |
 | `search_conversations` | Search messages by keyword | working |
-| `send_message` | Send a message to a LinkedIn user (requires confirmation) | [#433](https://github.com/stickerdaniel/linkedin-mcp-server/issues/433) [#441](https://github.com/stickerdaniel/linkedin-mcp-server/issues/441) [#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483) [#560](https://github.com/stickerdaniel/linkedin-mcp-server/issues/560) [#573](https://github.com/stickerdaniel/linkedin-mcp-server/issues/573) |
-| `reply_message` | Reply to an existing conversation thread by required thread ID (requires confirmation) | working |
+| `send_message` | Send a message to a LinkedIn user with optional real file attachments (requires confirmation) | [#433](https://github.com/stickerdaniel/linkedin-mcp-server/issues/433) [#441](https://github.com/stickerdaniel/linkedin-mcp-server/issues/441) [#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483) [#560](https://github.com/stickerdaniel/linkedin-mcp-server/issues/560) [#573](https://github.com/stickerdaniel/linkedin-mcp-server/issues/573) |
+| `reply_message` | Reply to an existing conversation thread by required thread ID, with optional real file attachments (requires confirmation) | working |
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs); about-section references may include a `company_urn` entry carrying the numeric id used by LinkedIn's people-search `currentCompany` URL facet | working |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | working |
 | `search_companies` | Search for companies on LinkedIn by keywords | working |
@@ -69,6 +69,8 @@ explicit confirmation workflow.
 Messaging conversation references returned by `get_inbox` and `search_conversations` now include row-level metadata captured from the inbox sidebar: `last_activity`, `preview`, `active`, `has_unread_marker`, `row_text`, and `read_state_confidence`.
 
 `reply_message` is the safest write path when you must stay in an existing conversation. It requires a `thread_id` and opens `/messaging/thread/<thread_id>/` directly. If LinkedIn redirects to a different thread or opens recipient selection instead of the requested thread, the tool fails closed with `thread_mismatch` and does not send.
+
+Both `send_message` and `reply_message` support optional `attachment_paths` (a list of local file paths). Attachment files are validated locally before navigation, then uploaded through LinkedIn's real message attachment input before send confirmation.
 
 Recommended workflow:
 - Use `search_conversations` (or `get_inbox`) to enumerate thread references.
