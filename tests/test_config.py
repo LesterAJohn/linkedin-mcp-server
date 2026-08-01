@@ -825,7 +825,9 @@ class TestLoaders:
 
     def test_args_user_id_overrides_env(self, monkeypatch):
         monkeypatch.setenv("USER_ID", "env-user")
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--user-id", "arg-user"])
+        monkeypatch.setattr(
+            "sys.argv", ["linkedin-mcp-server", "--user-id", "arg-user"]
+        )
         from linkedin_mcp_server.config import load_config
 
         config = load_config()

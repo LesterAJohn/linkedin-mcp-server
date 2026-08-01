@@ -1331,6 +1331,7 @@ class TestFeedTools:
         with pytest.raises(ValidationError, match="num_posts"):
             await mcp.call_tool("get_feed", {"num_posts": 51})
 
+
 class TestToolDefinitions:
     async def test_all_tools_expose_operational_guidance(self):
         import re
