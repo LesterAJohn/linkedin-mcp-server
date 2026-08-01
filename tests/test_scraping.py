@@ -5596,7 +5596,9 @@ class TestMessageAttachments:
                 attachment_paths=["/tmp/definitely-missing-file-1234.txt"],
             )
 
-    async def test_send_message_returns_attachment_upload_failed(self, mock_page, tmp_path):
+    async def test_send_message_returns_attachment_upload_failed(
+        self, mock_page, tmp_path
+    ):
         extractor = LinkedInExtractor(mock_page)
         attachment_path = tmp_path / "brief.pdf"
         attachment_path.write_text("pdf")

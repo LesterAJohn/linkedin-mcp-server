@@ -3844,9 +3844,7 @@ class LinkedInExtractor:
         counts = {
             "total": len(conversation_summaries),
             "read": sum(
-                1
-                for item in conversation_summaries
-                if item.get("read_state") == "read"
+                1 for item in conversation_summaries if item.get("read_state") == "read"
             ),
             "unread": sum(
                 1
