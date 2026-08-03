@@ -4252,10 +4252,18 @@ class LinkedInExtractor:
             before_count = len(collected)
             for row in visible_rows:
                 participant = str(row.get("participant") or "").lower()
-                key = "|".join(
-                    str(row.get(part) or "").strip().lower()
-                    for part in ("aria_label", "row_text", "last_activity", "preview")
-                ) or participant
+                key = (
+                    "|".join(
+                        str(row.get(part) or "").strip().lower()
+                        for part in (
+                            "aria_label",
+                            "row_text",
+                            "last_activity",
+                            "preview",
+                        )
+                    )
+                    or participant
+                )
                 if not key or key in seen:
                     continue
                 seen.add(key)

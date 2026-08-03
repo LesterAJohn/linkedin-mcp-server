@@ -4770,7 +4770,10 @@ class TestGetInbox:
         assert rows[2]["index"] == 2
         assert rows[2]["visible_index"] is None
         assert extractor._last_inbox_scroll_diagnostics["loaded_count"] == 3
-        assert extractor._last_inbox_scroll_diagnostics["stopped_reason"] == "requested_limit"
+        assert (
+            extractor._last_inbox_scroll_diagnostics["stopped_reason"]
+            == "requested_limit"
+        )
         scroll_mock.assert_awaited_once()
 
     async def test_get_inbox_includes_scroll_diagnostics(self, mock_page):
