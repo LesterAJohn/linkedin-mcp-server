@@ -1331,6 +1331,80 @@ class LinkedInExtractor:
             )
             await asyncio.sleep(pause_time)
 
+    async def _scroll_conversation_list_region(
+        self,
+        *,
+        position: Literal["top", "bottom", "page_down"],
+        pause_time: float = 0.5,
+    ) -> dict[str, Any]:
+        """Scroll the messaging conversation list without selecting rows."""
+        result = await self._page.evaluate(
+            r"""({ position }) => {
+                const main = document.querySelector('main');
+                if (!main) return { scrolled: false, reason: 'missing_main' };
+
+                const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+                const isScrollable = element => {
+                    if (!element) return false;
+                    const style = window.getComputedStyle(element);
+                    return (
+                        ['auto', 'scroll'].includes(style.overflowY) &&
+                        element.scrollHeight > element.clientHeight + 20
+                    );
+                };
+                const labelCount = element => element
+                    ? element.querySelectorAll('li label[aria-label]').length
+                    : 0;
+
+                const labels = Array.from(main.querySelectorAll('li label[aria-label]'));
+                const candidates = [];
+                for (const label of labels) {
+                    let current = label.closest('li');
+                    while (current && current !== document.body) {
+                        if (isScrollable(current)) candidates.push(current);
+                        if (current === main) break;
+                        current = current.parentElement;
+                    }
+                }
+
+                if (!candidates.length) {
+                    candidates.push(...[main, ...main.querySelectorAll('*')].filter(isScrollable));
+                }
+
+                const unique = Array.from(new Set(candidates));
+                const target = unique.sort((left, right) => {
+                    const labelDelta = labelCount(right) - labelCount(left);
+                    if (labelDelta) return labelDelta;
+                    return right.scrollHeight - left.scrollHeight;
+                })[0] || main;
+
+                const before = target.scrollTop;
+                if (position === 'top') {
+                    target.scrollTop = 0;
+                } else if (position === 'bottom') {
+                    target.scrollTop = target.scrollHeight;
+                } else {
+                    const step = Math.max(320, Math.floor(target.clientHeight * 0.85));
+                    target.scrollTop = Math.min(target.scrollTop + step, target.scrollHeight);
+                }
+                const after = target.scrollTop;
+                const maxTop = Math.max(0, target.scrollHeight - target.clientHeight);
+                return {
+                    scrolled: after !== before,
+                    before,
+                    after,
+                    atEnd: after >= maxTop - 2,
+                    labelCount: labelCount(target),
+                    targetText: normalize(target.getAttribute('aria-label') || target.className || target.tagName),
+                    scrollHeight: target.scrollHeight,
+                    clientHeight: target.clientHeight,
+                };
+            }""",
+            {"position": position},
+        )
+        await asyncio.sleep(pause_time)
+        return result if isinstance(result, dict) else {"scrolled": False}
+
     async def extract_feed(
         self,
         num_posts: int = 10,
@@ -3992,30 +4066,15 @@ class LinkedInExtractor:
         )
         result["conversations"] = conversation_summaries
         result["conversation_counts"] = counts
+        scroll_diagnostics = getattr(self, "_last_inbox_scroll_diagnostics", None)
+        if isinstance(scroll_diagnostics, dict):
+            result["inbox_scroll_diagnostics"] = scroll_diagnostics
         return result
 
-    async def _extract_inbox_conversation_summaries(
+    async def _extract_visible_inbox_conversation_summaries(
         self, limit: int | None
     ) -> list[dict[str, Any]]:
-        """Return visible inbox rows with best-effort read/unread state.
-
-        This intentionally runs before click-based thread-id enumeration,
-        because selecting an unread conversation can mark it as read. LinkedIn
-        does not expose a stable public read-state API in the DOM, so the state
-        is derived from accessible labels, class names, and hidden status text.
-        A visible conversation row with no unread marker is treated as read;
-        malformed or non-conversation rows are marked ``unknown``.
-        """
-        try:
-            await self._page.wait_for_selector(
-                "main li label[aria-label]",
-                state="attached",
-                timeout=10000,
-            )
-        except PlaywrightTimeoutError:
-            logger.debug("conversation labels did not appear within 10s")
-            return []
-
+        """Return currently loaded inbox rows without clicking them."""
         rows: list[dict[str, Any]] = await self._page.evaluate(
             r"""({ limit }) => {
                 const labels = Array.from(document.querySelectorAll(
@@ -4027,6 +4086,34 @@ class LinkedInExtractor:
                 const normalize = (value) => String(value || '')
                     .replace(/\s+/g, ' ').trim();
                 const lower = (value) => normalize(value).toLowerCase();
+                const uniqueLines = text => {
+                    const seen = new Set();
+                    const lines = [];
+                    for (const line of String(text || '').split(/\n+/)) {
+                        const cleaned = normalize(line);
+                        if (!cleaned || seen.has(cleaned)) continue;
+                        seen.add(cleaned);
+                        lines.push(cleaned);
+                    }
+                    return lines;
+                };
+                const hasBoldLeafText = row => {
+                    const elements = Array.from(row.querySelectorAll('*'));
+                    return elements.some(node => {
+                        if (!(node instanceof HTMLElement)) return false;
+                        const text = normalize(node.innerText);
+                        if (!text) return false;
+                        const childRepeatsText = Array.from(node.children).some(
+                            child => normalize(child.innerText) === text
+                        );
+                        if (childRepeatsText) return false;
+                        const weight = Number.parseInt(
+                            getComputedStyle(node).fontWeight,
+                            10
+                        );
+                        return Number.isFinite(weight) && weight >= 600;
+                    });
+                };
                 const results = [];
                 for (let i = 0; i < cap; i++) {
                     const label = labels[i];
@@ -4036,7 +4123,14 @@ class LinkedInExtractor:
                         label.getAttribute('aria-label') || ''
                     );
                     const rowText = normalize(row.innerText || '');
+                    const rowLines = uniqueLines(row.innerText);
                     const classText = lower(row.getAttribute('class') || '');
+                    const lastActivity = normalize(
+                        row.querySelector('time, [datetime]')?.textContent || ''
+                    );
+                    const participant = ariaLabel.replace(
+                        /^Select conversation with\s+/i, ''
+                    ).trim();
                     const stateText = lower([
                         ariaLabel,
                         rowText,
@@ -4051,22 +4145,46 @@ class LinkedInExtractor:
                             .map(el => el.getAttribute('class') || '')
                             .join(' '),
                     ].join(' '));
-                    const unread = /\\bunread\\b/.test(stateText)
+                    const unread = /\bunread\b/.test(stateText)
                         || /msg-conversation-card--unread/.test(stateText)
                         || /notification-badge|unread-count/.test(stateText);
                     const hasConversationRow =
-                        /^select conversation with\\s+/i.test(ariaLabel)
+                        /^select conversation with\s+/i.test(ariaLabel)
                         || /msg-conversation|conversation-card|msg-conversations/.test(stateText);
                     const read = !unread && (
-                        /\\bread\\b/.test(stateText)
+                        /\bread\b/.test(stateText)
                         || hasConversationRow
                     );
+                    const preview = rowLines.find(line => (
+                        line !== ariaLabel
+                        && line !== participant
+                        && line !== lastActivity
+                    )) || '';
+                    const active = Boolean(
+                        row.matches('[aria-current="page"], [aria-selected="true"]')
+                        || row.querySelector(
+                            '[aria-current="page"], [aria-selected="true"], input:checked, [checked]'
+                        )
+                        || /(^|\s)(active|selected)(\s|$)/i.test(String(row.className || ''))
+                    );
+                    const hasUnreadMarker = Boolean(
+                        row.querySelector('[data-test-unread], [class*="unread"]')
+                    );
+                    const readStateConfidence = hasUnreadMarker
+                        ? 'high'
+                        : hasBoldLeafText(row)
+                            ? 'medium'
+                            : 'low';
                     results.push({
                         index: i,
                         aria_label: ariaLabel,
-                        participant: ariaLabel.replace(
-                            /^Select conversation with\s+/i, ''
-                        ).trim(),
+                        participant,
+                        row_text: rowText,
+                        last_activity: lastActivity,
+                        preview,
+                        active,
+                        has_unread_marker: hasUnreadMarker,
+                        read_state_confidence: readStateConfidence,
                         read_state: unread
                             ? 'unread'
                             : (read ? 'read' : 'unknown'),
@@ -4080,17 +4198,101 @@ class LinkedInExtractor:
         normalized_rows: list[dict[str, Any]] = []
         for row in rows:
             if isinstance(row, dict):
-                row_data = row
+                row_data = dict(row)
             else:
                 row_data = {
                     "aria_label": str(row) if row is not None else "",
                     "read_state": "unknown",
                 }
             row_data["participant"] = self._strip_select_conversation_prefix(
-                str(row_data.get("aria_label", ""))
+                str(row_data.get("participant") or row_data.get("aria_label", ""))
             )
             normalized_rows.append(row_data)
         return normalized_rows
+
+    async def _extract_inbox_conversation_summaries(
+        self, limit: int | None
+    ) -> list[dict[str, Any]]:
+        """Return inbox rows loaded across scroll passes without clicking them.
+
+        Row summaries are captured before thread-id enumeration because opening
+        a row in LinkedIn can mark it read. The scroll loop merges rows that
+        LinkedIn has loaded into the conversation list until the requested
+        limit is reached or the list stops growing.
+        """
+        try:
+            await self._page.wait_for_selector(
+                "main li label[aria-label]",
+                state="attached",
+                timeout=10000,
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("conversation labels did not appear within 10s")
+            self._last_inbox_scroll_diagnostics = {
+                "requested_limit": limit,
+                "loaded_count": 0,
+                "scroll_attempts": 0,
+                "stopped_reason": "labels_timeout",
+            }
+            return []
+
+        requested = limit if limit is not None else 50
+        max_scrolls = max(3, min(12, ((requested or 50) + 9) // 10 + 3))
+        collected: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        stale_passes = 0
+        stopped_reason = "max_scrolls"
+        scroll_attempts = 0
+        last_scroll: dict[str, Any] = {}
+
+        for attempt in range(max_scrolls):
+            visible_rows = await self._extract_visible_inbox_conversation_summaries(
+                limit=None
+            )
+            before_count = len(collected)
+            for row in visible_rows:
+                participant = str(row.get("participant") or "").lower()
+                key = "|".join(
+                    str(row.get(part) or "").strip().lower()
+                    for part in ("aria_label", "row_text", "last_activity", "preview")
+                ) or participant
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                merged = dict(row)
+                merged["visible_index"] = merged.get("index")
+                merged["index"] = len(collected)
+                collected.append(merged)
+                if limit is not None and len(collected) >= limit:
+                    stopped_reason = "requested_limit"
+                    break
+            if limit is not None and len(collected) >= limit:
+                break
+
+            if len(collected) == before_count:
+                stale_passes += 1
+            else:
+                stale_passes = 0
+
+            last_scroll = await self._scroll_conversation_list_region(
+                position="page_down", pause_time=0.5
+            )
+            scroll_attempts = attempt + 1
+            if last_scroll.get("atEnd") and stale_passes >= 1:
+                stopped_reason = "end_of_list"
+                break
+            if stale_passes >= 3:
+                stopped_reason = "no_new_rows"
+                break
+
+        self._last_inbox_scroll_diagnostics = {
+            "requested_limit": limit,
+            "loaded_count": len(collected),
+            "scroll_attempts": scroll_attempts,
+            "stopped_reason": stopped_reason,
+            "last_scroll": last_scroll,
+        }
+        return collected[:limit] if limit is not None else collected
 
     async def _extract_conversation_thread_refs(
         self, limit: int | None, context: str, *, name_filter: str | None = None

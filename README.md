@@ -61,12 +61,13 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 Each MCP tool definition includes when to use it, alternatives, read/write risk,
 authentication and browser prerequisites, active-profile selection behavior,
 parameter constraints, response keys, common failures, recommended follow-up
-tools, and a valid JSON invocation example. `get_conversation` and
-`search_conversations` are marked as mutating reads because selecting inbox rows
-may mark messages as read. Outbound actions remain destructive and require an
-explicit confirmation workflow.
+tools, and a valid JSON invocation example. `get_inbox`, `get_conversation`,
+and `search_conversations` are marked as mutating reads because resolving thread
+references can visit matching inbox rows and LinkedIn may mark those rows as
+read. Outbound actions remain destructive and require an explicit confirmation
+workflow.
 
-Messaging conversation references returned by `get_inbox` and `search_conversations` now include row-level metadata captured from the inbox sidebar: `last_activity`, `preview`, `active`, `has_unread_marker`, `row_text`, and `read_state_confidence`.
+Messaging conversation references returned by `get_inbox` and `search_conversations` now include row-level metadata captured from the inbox sidebar: `last_activity`, `preview`, `active`, `has_unread_marker`, `row_text`, and `read_state_confidence`. `get_inbox` also returns `inbox_scroll_diagnostics` so workflow summaries can show how many rows were loaded across non-click scroll passes before thread-reference resolution.
 
 `reply_message` is the safest write path when you must stay in an existing conversation. It requires a `thread_id` and opens `/messaging/thread/<thread_id>/` directly. If LinkedIn redirects to a different thread or opens recipient selection instead of the requested thread, the tool fails closed with `thread_mismatch` and does not send.
 

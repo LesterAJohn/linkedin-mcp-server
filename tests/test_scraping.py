@@ -4742,6 +4742,97 @@ class TestGetInbox:
         assert refs[0]["url"] == "/messaging/thread/2-abc123/"
         assert refs[0]["text"] == "Tony Chan"
 
+    async def test_extract_inbox_summaries_scrolls_until_limit(self, mock_page):
+        """Inbox summaries merge rows across non-click scroll passes."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.wait_for_selector = AsyncMock()
+        first = [
+            {"aria_label": "Select conversation with Alpha", "participant": "Alpha"},
+            {"aria_label": "Select conversation with Beta", "participant": "Beta"},
+        ]
+        second = first + [
+            {"aria_label": "Select conversation with Gamma", "participant": "Gamma"},
+        ]
+        visible_mock = AsyncMock(side_effect=[first, second])
+        scroll_mock = AsyncMock(return_value={"scrolled": True, "atEnd": False})
+
+        with (
+            patch.object(
+                extractor,
+                "_extract_visible_inbox_conversation_summaries",
+                visible_mock,
+            ),
+            patch.object(extractor, "_scroll_conversation_list_region", scroll_mock),
+        ):
+            rows = await extractor._extract_inbox_conversation_summaries(limit=3)
+
+        assert [row["participant"] for row in rows] == ["Alpha", "Beta", "Gamma"]
+        assert rows[2]["index"] == 2
+        assert rows[2]["visible_index"] is None
+        assert extractor._last_inbox_scroll_diagnostics["loaded_count"] == 3
+        assert extractor._last_inbox_scroll_diagnostics["stopped_reason"] == "requested_limit"
+        scroll_mock.assert_awaited_once()
+
+    async def test_get_inbox_includes_scroll_diagnostics(self, mock_page):
+        """get_inbox surfaces diagnostics from the non-click inbox scroll loop."""
+        extractor = LinkedInExtractor(mock_page)
+        extractor._last_inbox_scroll_diagnostics = {
+            "requested_limit": 50,
+            "loaded_count": 42,
+            "scroll_attempts": 6,
+            "stopped_reason": "end_of_list",
+        }
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value={"text": "Alpha", "references": []},
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                return_value="Alpha",
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.build_references",
+                return_value=[],
+            ),
+            patch.object(
+                extractor,
+                "_extract_inbox_conversation_summaries",
+                new_callable=AsyncMock,
+                return_value=[{"participant": "Alpha", "read_state": "read"}],
+            ),
+            patch.object(
+                extractor,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+        ):
+            result = await extractor.get_inbox(limit=50)
+
+        assert result["conversation_counts"] == {
+            "total": 1,
+            "read": 1,
+            "unread": 0,
+            "unknown": 0,
+        }
+        assert result["inbox_scroll_diagnostics"]["loaded_count"] == 42
+
 
 class TestGetConversation:
     async def test_returns_conversation_by_thread_id(self, mock_page):

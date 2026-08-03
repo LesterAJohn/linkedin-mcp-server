@@ -29,7 +29,10 @@ def register_messaging_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Get Inbox",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        # Not read-only: the summary scroll pass does not click rows, but
+        # resolving thread IDs still visits returned rows and LinkedIn can mark
+        # those conversations read.
+        annotations={"readOnlyHint": False, "openWorldHint": True},
         tags={"messaging", "scraping"},
         exclude_args=["extractor"],
     )
@@ -43,8 +46,9 @@ def register_messaging_tools(
 
         Use for an inbox overview before selecting a thread. Do not use for
         keyword filtering (use search_conversations) or a full thread body (use
-        get_conversation). Read-only: scrolls the inbox without intentionally
-        opening rows or changing message state.
+        get_conversation). Low-risk mutating read: the inbox summary scroll pass
+        does not click rows, but thread-reference resolution visits returned rows
+        and LinkedIn can mark those conversations read.
 
         Requires network access, Patchright Chromium, an authenticated LinkedIn
         profile with messaging access, and an active profile/runtime selection.
@@ -65,7 +69,7 @@ def register_messaging_tools(
 
         Returns:
             Dict with url, sections (inbox -> raw text), conversation_counts,
-            conversations, and optional references.
+            conversations, optional references, and optional inbox_scroll_diagnostics.
         """
         try:
             extractor = extractor or await get_ready_extractor(
