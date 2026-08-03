@@ -59,6 +59,12 @@ from linkedin_mcp_server import __version__, daemon_config, daemon_descriptor
 from linkedin_mcp_server.config import set_config
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_lock import DaemonLock, DaemonLockError
+from linkedin_mcp_server.daemon_liveness import (
+    CALL_HEADER,
+    HEARTBEAT_PATH,
+    call_id_in,
+    get_liveness,
+)
 from linkedin_mcp_server.drivers.browser import set_headless
 from linkedin_mcp_server.logging_config import configure_logging
 from linkedin_mcp_server.server_role import (
@@ -227,7 +233,13 @@ async def _probe(url: str, token: str) -> None:
 
 
 #: The route a newer frontend uses to ask a stale owner to stand down. Part of
-#: the daemon's own protocol, so a change here is a ``PROTOCOL_VERSION`` bump.
+#: the daemon's own protocol, so a change to *this* route is a
+#: ``PROTOCOL_VERSION`` bump: every turnover depends on it, and a frontend that
+#: guessed wrong about it would wait out its whole budget against a held lock.
+#:
+#: Adding a route beside it is a different question, answered where the version
+#: is defined. The heartbeat route was added without a bump because both sides
+#: work without it; this one they do not.
 STAND_DOWN_PATH = "/control/stand-down"
 
 
@@ -302,6 +314,29 @@ def create_owner_server(
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             stand_down()
             return JSONResponse({"standing_down": True})
+
+    @mcp.custom_route(HEARTBEAT_PATH, methods=["POST"])
+    async def heartbeat_route(request: Request) -> JSONResponse:
+        """Note that somebody is still waiting for a call this owner is running.
+
+        The same explicit token check as the route above, for the same measured
+        reason: a custom route is mounted outside the authentication middleware,
+        so without this any process on the machine could keep a call alive that
+        its own frontend had already abandoned.
+
+        A call this owner does not know gets ``watched: false`` rather than an
+        error. It is the ordinary race, not a fault: a beat sent while the call
+        was returning arrives after it was released, and the frontend has
+        nothing useful to do about that.
+        """
+        header = request.headers.get("authorization", "")
+        scheme, _, presented = header.partition(" ")
+        if scheme.lower() != "bearer" or not _matches_token(presented, token):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        call_id = call_id_in(request.headers.get(CALL_HEADER))
+        if call_id is None:
+            return JSONResponse({"error": "no call named"}, status_code=400)
+        return JSONResponse({"watched": get_liveness().heard(call_id)})
 
     app = mcp.http_app(
         path=MCP_PATH,
@@ -382,6 +417,11 @@ async def _serve(
         )
 
         daemon_descriptor.publish(auth_root, descriptor, token)
+        # The idle clock starts here rather than at startup: before the
+        # descriptor is published nobody can reach this owner, and counting the
+        # import and the browser launch as quiet time would let a short timeout
+        # expire before the frontend that asked for it could call.
+        get_liveness().the_endpoint_is_live()
         # Only now, and only while the lock is held: a token file that is not
         # this generation's belongs to an owner that is gone, because a live one
         # would be holding the lock this process has.
@@ -400,7 +440,9 @@ async def _serve(
         raise
 
     del lock  # held for the process lifetime; named to say so
-    await _serve_until_stopped(server, serving, turnover)
+    await _serve_until_stopped(
+        server, serving, turnover, config.browser.browser_idle_timeout_seconds
+    )
     return 0
 
 
@@ -422,7 +464,10 @@ _FAILED_STARTUP_SHUTDOWN_SECONDS = 10.0
 
 
 async def _serve_until_stopped(
-    server: Any, serving: asyncio.Task[None], turnover: list[str]
+    server: Any,
+    serving: asyncio.Task[None],
+    turnover: list[str],
+    idle_timeout: float = 0.0,
 ) -> None:
     """Hold the endpoint open until it stops, or until asked to give way.
 
@@ -462,6 +507,27 @@ async def _serve_until_stopped(
             # find the position occupied by a process that is no longer serving.
             # Giving up the wait and exiting is the lesser harm: the lock is
             # freed by the exit either way.
+            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS)
+            return
+        # Cheap enough to do on the same tick as the two questions above: one
+        # dictionary scan over the calls in flight, on a process that is already
+        # polling. A timer of its own would be a second thing to shut down.
+        liveness = get_liveness()
+        liveness.cancel_the_abandoned()
+        # And the third reason to go, after wedge and turnover. An owner holds
+        # the daemon lock for the machine's uptime otherwise, having closed the
+        # browser hours ago: the process is what the next election has to wait
+        # for, not the Chromium it is no longer running.
+        #
+        # `quiet_for` answers None while any call is in flight, marked or not,
+        # so this cannot cut one off. The stale descriptor is left behind
+        # deliberately: the next election probes it, is refused, and elects a
+        # replacement, whereas deleting it here would race whoever publishes
+        # next.
+        quiet = liveness.quiet_for()
+        if idle_timeout > 0 and quiet is not None and quiet >= idle_timeout:
+            logger.info("Nothing has needed the browser in %.0fs; exiting", quiet)
+            server.should_exit = True
             await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS)
             return
         await asyncio.sleep(_STAND_DOWN_POLL_SECONDS)
