@@ -5677,7 +5677,7 @@ class TestReplyMessage:
             ),
             patch.object(
                 extractor,
-                "_message_text_visible",
+                "_message_send_confirmed",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
@@ -5822,7 +5822,7 @@ class TestMessageAttachments:
             ) as upload_mock,
             patch.object(
                 extractor,
-                "_message_text_visible",
+                "_message_send_confirmed",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
@@ -5982,7 +5982,7 @@ class TestSendMessageComposerInteraction:
             patches[9],
             patch.object(
                 extractor,
-                "_message_text_visible",
+                "_message_send_confirmed",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
@@ -6049,7 +6049,7 @@ class TestSendMessageComposerInteraction:
             patches[9],
             patch.object(
                 extractor,
-                "_message_text_visible",
+                "_message_send_confirmed",
                 new_callable=AsyncMock,
                 return_value=True,
             ),

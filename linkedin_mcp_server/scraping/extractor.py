@@ -2809,24 +2809,72 @@ class LinkedInExtractor:
         )
         return bool(matched)
 
-    async def _message_text_visible(self, message: str) -> bool:
-        """Wait until the compose page visibly contains the just-sent message text.
+    async def _message_send_confirmed(self, message: str) -> bool:
+        """Wait until the just-sent message appears outside the draft composer.
 
+        The previous check looked at the whole document body, so a draft that
+        remained in the composer could be mistaken for a sent message. LinkedIn
+        can also keep composer text around briefly after a successful post, so
+        success is based on finding the text in a visible thread item that is not
+        the composer or an ancestor of the composer.
         Uses the page-level default timeout (``BrowserConfig.default_timeout``).
         """
         try:
             await self._page.wait_for_function(
-                """({ expected }) => {
+                r"""({ expected }) => {
                     const normalize = value =>
-                        (value || '').replace(/\\s+/g, ' ').trim();
-                    const bodyText = normalize(document.body?.innerText || '');
-                    return bodyText.includes(normalize(expected));
+                        (value || '').replace(/\s+/g, ' ').trim();
+                    const target = normalize(expected);
+                    if (!target) return false;
+
+                    const isVisible = element =>
+                        !!(
+                            element &&
+                            (element.offsetWidth ||
+                                element.offsetHeight ||
+                                element.getClientRects().length)
+                        );
+                    const textOf = element =>
+                        normalize(
+                            element?.innerText ||
+                                element?.value ||
+                                element?.textContent ||
+                                ''
+                        );
+
+                    const draftSelectors = [
+                        'div[role="textbox"][contenteditable="true"]',
+                        'textarea',
+                        'input[type="text"]',
+                    ].join(',');
+                    const transcriptSelectors = [
+                        '[data-test-msg-event]',
+                        '.msg-s-message-list__event',
+                        '.msg-s-event-listitem',
+                        'li',
+                        'article',
+                    ].join(',');
+                    const transcriptItems = Array.from(
+                        document.querySelectorAll(transcriptSelectors)
+                    ).filter(element =>
+                        isVisible(element) &&
+                        !element.matches(draftSelectors) &&
+                        !element.closest(draftSelectors) &&
+                        !element.querySelector(draftSelectors)
+                    );
+                    return transcriptItems.some(element =>
+                        textOf(element).includes(target)
+                    );
                 }""",
                 arg={"expected": message},
             )
             return True
         except PlaywrightTimeoutError:
             return False
+
+    async def _message_text_visible(self, message: str) -> bool:
+        """Backward-compatible wrapper for older tests/extensions."""
+        return await self._message_send_confirmed(message)
 
     async def _dismiss_message_ui(self) -> None:
         """Best-effort dismissal for the profile messaging UI."""
@@ -4643,7 +4691,7 @@ class LinkedInExtractor:
         if not sent_via_js:
             await self._page.keyboard.press("Enter")
 
-        if not await self._message_text_visible(message):
+        if not await self._message_send_confirmed(message):
             await self._dismiss_message_ui()
             return self._message_action_result(
                 self._page.url,

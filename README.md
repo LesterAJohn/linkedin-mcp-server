@@ -70,6 +70,8 @@ Messaging conversation references returned by `get_inbox` and `search_conversati
 
 `reply_message` is the safest write path when you must stay in an existing conversation. It requires a `thread_id` and opens `/messaging/thread/<thread_id>/` directly. If LinkedIn redirects to a different thread or opens recipient selection instead of the requested thread, the tool fails closed with `thread_mismatch` and does not send.
 
+After a confirmed send, `reply_message` and `send_message` verify success by finding the outbound text in a visible conversation item outside the editable composer. Draft text left in the composer is not treated as send confirmation, so automation fails closed instead of reporting a false successful send.
+
 Both `send_message` and `reply_message` support optional `attachment_paths` (a list of local file paths). Attachment files are validated locally before navigation, then uploaded through LinkedIn's real message attachment input before send confirmation.
 
 Recommended workflow:
