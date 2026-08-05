@@ -89,6 +89,33 @@ def credential_free_url(value: str) -> str:
     return value
 
 
+# Refused rather than ignored. A user who set this did so to change how the
+# browser presents itself, and dropping it silently would leave them believing
+# it still applies. The setting never worked the way it reads: Patchright only
+# overrides the user-agent string, so the client hints kept reporting the real
+# browser and the page saw two different answers to the same question. Service
+# workers never received the override at all
+# (https://github.com/microsoft/playwright/issues/5237, closed upstream).
+#
+# The second sentence about a running server is not padding. A shared owner
+# started by an older version carries its user agent in the configuration
+# fingerprint, and a client of this version can only compute ``None`` because
+# the setting is refused here. ``daemon.py`` rejects a fingerprint mismatch
+# before it ever compares package versions, so that owner can no longer be
+# asked to stand down: it keeps running and keeps the profile. Removing the
+# setting is therefore only half the fix, and the other half is invisible
+# unless this message says it.
+_USER_AGENT_REMOVED = (
+    "{setting} is no longer supported and the server will not start with it "
+    "set. Overriding the user agent left the browser contradicting itself: the "
+    "string changed but the client hints did not, and service workers kept the "
+    "original either way. The browser now reports its own identity "
+    "consistently. Remove the setting to start. If a shared server from an "
+    "earlier version is still running with it, stop that process too: it "
+    "cannot be retired automatically."
+)
+
+
 class EnvironmentKeys:
     """Environment variable names used by the application."""
 
@@ -245,9 +272,8 @@ def load_from_env(config: AppConfig) -> AppConfig:
             )
         setattr(config.browser, attribute, value)
 
-    # Custom user agent
-    if user_agent_env := os.environ.get(EnvironmentKeys.USER_AGENT):
-        config.browser.user_agent = user_agent_env
+    if os.environ.get(EnvironmentKeys.USER_AGENT):
+        raise ConfigurationError(_USER_AGENT_REMOVED.format(setting="USER_AGENT"))
 
     # HTTP server host
     if host_env := os.environ.get(EnvironmentKeys.HOST):
@@ -404,11 +430,13 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Slow down browser actions by N milliseconds (debugging)",
     )
 
+    # Still accepted by the parser so using it produces the explanation above
+    # rather than argparse's bare "unrecognized arguments".
     parser.add_argument(
         "--user-agent",
         type=str,
         default=None,
-        help="Custom browser user agent",
+        help=argparse.SUPPRESS,
     )
 
     parser.add_argument(
@@ -416,7 +444,10 @@ def load_from_args(config: AppConfig) -> AppConfig:
         type=str,
         default=None,
         metavar="WxH",
-        help="Browser viewport size (default: 1280x720)",
+        help=(
+            "Browser viewport size (default: 1280x720). Applies to the normal "
+            "windowless mode only; a headed launch uses the real window size."
+        ),
     )
 
     parser.add_argument(
@@ -553,6 +584,18 @@ def load_from_args(config: AppConfig) -> AppConfig:
     )
 
     parser.add_argument(
+        "--claim-profile-root",
+        action="store_true",
+        help=(
+            "Take over a non-default profile directory that this server will "
+            "not claim on its own: one whose parent already holds other files, "
+            "or one carrying an ownership marker written for a different path. "
+            "Needed once; this server moves and deletes that whole parent when "
+            "it rotates or clears a session"
+        ),
+    )
+
+    parser.add_argument(
         "--import-from-browser",
         nargs="?",
         const="auto",
@@ -590,27 +633,24 @@ def load_from_args(config: AppConfig) -> AppConfig:
         ),
     )
 
+    # Accepted and inert. There is one browser now, so "up front" and "lazily"
+    # describe the same install. Kept rather than removed so an existing command
+    # line or compose file does not stop working over a setting that no longer
+    # decides anything; hidden from help so nobody adopts it.
     eager_full_group = parser.add_mutually_exclusive_group()
     eager_full_group.add_argument(
         "--eager-full-chromium",
         dest="eager_full_chromium",
         action="store_true",
         default=None,
-        help=(
-            "Install full Chrome for Testing up front during browser setup "
-            "instead of lazily on the first headed login (pre-warms the headed "
-            "login fallback at the cost of a larger initial download)"
-        ),
+        help=argparse.SUPPRESS,
     )
     eager_full_group.add_argument(
         "--no-eager-full-chromium",
         dest="eager_full_chromium",
         action="store_false",
         default=None,
-        help=(
-            "Install full Chrome for Testing lazily on the first headed login "
-            "(default; overrides EAGER_FULL_CHROMIUM=true)."
-        ),
+        help=argparse.SUPPRESS,
     )
 
     daemon_group = parser.add_mutually_exclusive_group()
@@ -663,7 +703,7 @@ def load_from_args(config: AppConfig) -> AppConfig:
         config.browser.slow_mo = args.slow_mo
 
     if args.user_agent:
-        config.browser.user_agent = args.user_agent
+        raise ConfigurationError(_USER_AGENT_REMOVED.format(setting="--user-agent"))
 
     # Viewport (validated in BrowserConfig.validate())
     if args.viewport:
@@ -722,6 +762,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.user_data_dir:
         config.browser.user_data_dir = args.user_data_dir
+
+    if args.claim_profile_root:
+        config.server.claim_profile_root = True
 
     if args.import_from_browser is not None:
         value = args.import_from_browser.strip().lower()

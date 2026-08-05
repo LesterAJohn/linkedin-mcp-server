@@ -38,6 +38,7 @@ from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.exceptions import (
     BrowserBusyError,
     BrowserShutdownUnconfirmedError,
+    ProfileRootRefusedError,
 )
 from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
 from linkedin_mcp_server.server_role import a_held_profile_means_this_owner_must_go
@@ -273,17 +274,13 @@ def _make_browser(
     *,
     launch_options: dict[str, Any],
     viewport: dict[str, int],
-    user_agent: str | None = None,
 ) -> BrowserManager:
-    """Build a BrowserManager. An explicit USER_AGENT (env/CLI) always wins;
-    *user_agent* is the session's own UA (the source browser's, recorded at
-    import time) and applies only when no override is configured."""
+    """Build a BrowserManager on *profile_dir*."""
     config = get_config()
     return BrowserManager(
         user_data_dir=profile_dir,
         headless=_headless,
         slow_mo=config.browser.slow_mo,
-        user_agent=config.browser.user_agent or user_agent,
         viewport=viewport,
         **launch_options,
     )
@@ -294,13 +291,11 @@ async def _authenticate_existing_profile(
     *,
     launch_options: dict[str, Any],
     viewport: dict[str, int],
-    user_agent: str | None = None,
 ) -> BrowserManager:
     browser = _make_browser(
         profile_dir,
         launch_options=launch_options,
         viewport=viewport,
-        user_agent=user_agent,
     )
     try:
         await browser.start()
@@ -325,17 +320,13 @@ async def _authenticate_existing_profile(
         raise
 
 
-async def validate_imported_cookies(
-    cookie_path: Path, profile_dir: Path, *, user_agent: str | None = None
-) -> bool:
+async def validate_imported_cookies(cookie_path: Path, profile_dir: Path) -> bool:
     """Validate freshly imported cookies against /feed/ before persisting.
 
     Starts a headless browser on *profile_dir*, injects the LinkedIn cookies
     from *cookie_path*, and proves /feed/ with the same validator login and the
     Docker bridge use (``_feed_auth_succeeds``: remember-me resolution plus
     auth-barrier detection). Used only by the browser-import CLI path.
-    *user_agent* is the source browser's synthesized UA — validating under the
-    same UA the runtime will use keeps the proof representative.
 
     A local :class:`BrowserManager` is used (never the singleton), so
     ``close_browser()``'s export-on-close is not involved and cannot shrink
@@ -351,7 +342,6 @@ async def validate_imported_cookies(
         profile_dir,
         launch_options=launch_options,
         viewport=viewport,
-        user_agent=user_agent,
     )
     try:
         await browser.start()
@@ -408,7 +398,6 @@ async def _bridge_runtime_profile(
         profile_dir,
         launch_options=launch_options,
         viewport=viewport,
-        user_agent=source_state.user_agent,
     )
     try:
         await browser.start()
@@ -474,7 +463,6 @@ async def _bridge_runtime_profile(
             profile_dir,
             launch_options=launch_options,
             viewport=viewport,
-            user_agent=source_state.user_agent,
         )
         try:
             await reopened.start()
@@ -526,7 +514,15 @@ async def _bridge_runtime_profile(
                 "The bridge browser did not shut down cleanly, so its runtime "
                 "profile is kept. Restart the server to recover."
             ) from exc
-        clear_runtime_profile(runtime_id, source_profile_dir)
+        try:
+            clear_runtime_profile(runtime_id, source_profile_dir)
+        except ProfileRootRefusedError as refusal:
+            # Cleanup, not a precondition. The bridge has already failed and
+            # that failure is what the caller needs to see; a complaint about
+            # who owns the directory would replace it with something nobody can
+            # act on. The clear at the top of this function is the opposite case
+            # and deliberately lets the refusal through.
+            logger.warning("Leaving the runtime profile in place: %s", refusal)
         raise
 
 
@@ -660,7 +656,6 @@ async def _create_browser_locked() -> BrowserManager:
             source_profile_dir,
             launch_options=launch_options,
             viewport=viewport,
-            user_agent=source_state.user_agent,
         )
         _apply_browser_settings(browser)
         _browser = browser
@@ -715,7 +710,6 @@ async def _create_browser_locked() -> BrowserManager:
                 derived_profile_dir,
                 launch_options=launch_options,
                 viewport=viewport,
-                user_agent=source_state.user_agent,
             )
             _apply_browser_settings(browser)
             _browser = browser
