@@ -539,10 +539,11 @@ class TestAnOwnerGoesQuiescentInsteadOfLoggingIn:
         )
 
     async def test_a_single_server_is_not_asked_to_stand_down(self):
-        """The same condition, and deliberately not the same answer.
+        """A held profile asks a direct server to give way for a restart.
 
-        A DIRECT server has no successor to elect. Asking it to stand down would
-        end the only server the client has, over something a restart fixes.
+        Direct HTTP mode can be supervised by a runtime (for example Docker or
+        Podman restart policies). When teardown cannot be confirmed, setting the
+        stand-down latch lets the supervisor replace the wedged process.
         """
         from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
         from linkedin_mcp_server.server_role import stand_down_reason
@@ -579,7 +580,7 @@ class TestAnOwnerGoesQuiescentInsteadOfLoggingIn:
             with pytest.raises(BrowserShutdownUnconfirmedError):
                 await handle_auth_error(AuthenticationError("expired"), ctx=None)
 
-        assert stand_down_reason() is None
+        assert stand_down_reason() is not None
 
 
 class TestAWedgeFromAnywhereFreesTheOwner:
@@ -687,7 +688,7 @@ class TestAWedgeFromAnywhereFreesTheOwner:
         )
 
     def test_a_single_server_is_left_alone(self):
-        """Its client owns it, so "restart the server" is something to act on."""
+        """A held profile in direct mode also raises the stand-down latch."""
         from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
         from linkedin_mcp_server.server_role import stand_down_reason
 
@@ -698,7 +699,7 @@ class TestAWedgeFromAnywhereFreesTheOwner:
         ):
             BrowserShutdownUnconfirmedError("the startup teardown timed out")
 
-        assert stand_down_reason() is None
+        assert stand_down_reason() is not None
 
     async def test_a_quiet_close_that_keeps_the_profile_also_frees_the_owner(self):
         """The path that reports nothing at all, which is why it was missed twice.
