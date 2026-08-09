@@ -78,8 +78,8 @@ headless".
 | Full Chromium headless (`channel="chromium"`) | 67% / 50% | Two high-severity fpscanner rules from the headless token |
 | Headless shell (the old default) | — | `plugins.length = 0`, no `window.chrome`, notification permission incoherent |
 | Hidden target, windowless mode (macOS) | — | No headless token in UA or brands; `visible` / focused; rAF at 100% of a control window |
-| Docker, headed under Xvfb | 0% / 44% | No headless token, native hints; needs `xauth` |
-| Docker, Xvfb + Mesa llvmpipe | 0% / 44% | Restores WebGL; renderer string is a known software renderer |
+| Docker, headed under Xvfb | 0% / 44% | No headless token, native hints; Xvfb is started directly in Python's process group |
+| Docker, Xvfb + Mesa llvmpipe | 0% / 44% | WebGL1 and WebGL2; byte-identical renderer across both published architectures |
 
 The windowless mode, measured end to end through `BrowserManager`:
 
@@ -111,6 +111,66 @@ like Linux, so it is not claimed.
 Linux is less a gap than a different answer: under a virtual display nobody is
 looking at the screen, so an ordinary window is already invisible and there is
 nothing to hide.
+
+### Docker WebGL on the virtual display
+
+Measured in the candidate image on Linux amd64 and arm64, ten cold browser
+launches per architecture. Headed Chromium under Xvfb started with no WebGL1 or
+WebGL2 context even though Mesa's `swrast_dri.so` and `kms_swrast_dri.so` were
+present. The result was 0/10 on both architectures, and every explicit renderer
+selector tried stayed there: `--use-gl=angle --use-angle=gl`, `--use-gl=egl`,
+`--use-gl=desktop` and ANGLE Vulkan.
+
+The working configuration is the simpler one:
+
+```
+--enable-webgl --ignore-gpu-blocklist
+```
+
+It does not choose a renderer. It lets Chromium use the Mesa path already in the
+image. Results, across all twenty cold launches:
+
+| | amd64 | arm64 |
+|---|---|---|
+| WebGL1 context | 10/10 | 10/10 |
+| WebGL2 context | 10/10 | 10/10 |
+| Unmasked renderer | `ANGLE (Mesa/X.org, llvmpipe (LLVM 15.0.6 128 bits), OpenGL 4.5)` | same, byte-identical |
+| SwiftShader | absent | absent |
+| GPU-process crash | none | none |
+| High-entropy architecture / bitness | `x86` / `64` | `arm` / `64` |
+| Headless token | absent | absent |
+| Page, workers and cross-origin frame agree | yes | yes |
+| `outer <= screen` | yes | yes |
+
+SwiftShader was measured as the one other path that creates both contexts. It is
+excluded: its renderer names `SwiftShader` explicitly, and Patchright strips the
+unsafe fallback on purpose because that string is an automation signal in its
+own right. `LIBGL_ALWAYS_SOFTWARE=1` changed none of the failed explicit-selector
+results and is not set.
+
+The display adds no package of its own: Xvfb already comes from Patchright's
+Chromium dependency set, and starting it directly needs no `xauth`. Installing
+only full Chromium with `--no-shell` makes the resulting image smaller than the
+previous full-plus-shell image, not larger. Measured from clean builds of the
+same source: 543.5 to 429.6 MiB on arm64 (-113.9 MiB), and 512.4 to 406.2 MiB on
+amd64 (-106.2 MiB), using Docker's uncompressed image size.
+
+### Docker shutdown and display lifetime
+
+`xvfb-run` is not the image supervisor. Measured under `docker stop`,
+`tini -g -- xvfb-run ... python` exited 143 without Python running its shutdown
+path: `xvfb-run` has an EXIT trap for Xvfb and no TERM forwarder for its child.
+Starting Xvfb and Python under one small supervisor in the same process group
+lets `tini -g` deliver TERM to all three. The supervisor also makes display
+liveness container liveness: if Xvfb dies, it terminates Python and exits
+non-zero instead of leaving a live MCP endpoint whose next browser cannot open.
+Uvicorn logged its complete application shutdown before the container exited,
+in 0.50 seconds.
+
+The experimental daemon is refused in a container. Its owner deliberately
+starts a new session so it can outlive a stdio frontend; measured there, it had
+a distinct process group while Xvfb remained the frontend's child. Letting that
+owner survive would give the browser a lifetime the display does not share.
 
 Two things this does not claim. The half second of visible window on every
 browser start cannot be shortened from here — roughly 250 ms passes before
@@ -146,6 +206,46 @@ Network layer, same machine:
 
 The TLS handshakes differ by one extension. That is invisible to every
 JavaScript test above and cannot be influenced by any launch option.
+
+### Re-measured on Chrome for Testing 149
+
+The windowless-mode table near the top of this section is stamped at patchright
+1.60.1. When the lock moved to 1.61.2 (macOS bundles Chrome for Testing
+149.0.7827.55; the arm64 Linux image bundles Playwright's own Chromium build at
+the same revision, which is why the product names differ by platform), those
+identity properties were taken again through `BrowserManager` on macOS.
+
+Against a loopback origin rather than `about:blank`: `navigator.userAgentData`
+needs a secure context, and `about:blank` is not one, so a probe there measures
+nothing. Verified rather than assumed — `about:blank` reports
+`isSecureContext: false` and `userAgentData: undefined`, loopback reports
+`true` and an object.
+
+| | Value on 149 |
+|---|---|
+| User agent | `…Chrome/149.0.0.0…`, no `HeadlessChrome` |
+| `sec-ch-ua` brands | `Chromium/149`, `Not)A;Brand/24`, major agreeing with the UA |
+| High-entropy hints | `arm`, `64`, two `fullVersionList` entries |
+| `navigator.webdriver` | `false` |
+| `document.visibilityState` / `hasFocus()` | `visible` / `true` |
+| Outer window vs screen | 1280x720 on 1280x720, so it fits, but see below |
+| `navigator.plugins.length` / `window.chrome` | 5 / `object` |
+| `Notification.permission` | `default` |
+| `requestAnimationFrame` | 122/s, matching the 148 figure |
+
+The geometry row is not a clean result. `outerWidth == screen.width` is the
+open item recorded above: it fits, which is all the coherence bar asks, but no
+real window reports it, and 149 did not change that either way.
+
+Not re-measured on 149: the CreepJS and fpscanner scores, the JA4 and HTTP/2
+fingerprints, the startup-flash timing, and the cookie-across-restart check.
+Those rows stay 148 measurements and are labelled as such rather than assumed
+to carry over.
+
+"Window on screen once settled" is not in that list and not in the table
+either, because it is implied rather than skipped: the windowless path fails
+closed, so a run that produced these values had a hidden target and no window.
+That is an inference, not a CoreGraphics poll like the 148 row was.
 
 ## Things that look like fixes and are not
 

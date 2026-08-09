@@ -278,6 +278,7 @@ while a container is running.
 - Ensure you have uv installed: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - Check uv version: `uv --version` (should be 0.4.0 or higher)
 - On first run, `uvx` downloads all Python dependencies. On slow connections, uv's default 30s HTTP timeout may be too short. The recommended config above already sets `UV_HTTP_TIMEOUT=300` (seconds) to avoid this.
+- *Windows, `DLL load failed while importing _greenlet`*: install the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist). The published Windows wheels for greenlet 3.3.1 through 3.5.4 need `MSVCP140.dll` from it, and neither the python.org installer nor the `uv`-managed builds carry that DLL. A greenlet built from source can need it at any version. Without administrator rights, `uvx --with "greenlet<=3.3.0" mcp-server-linkedin@latest` usually works instead: the published wheels up to 3.3.0 carry the runtime inside the extension, and they are x86-64 only. Tracked upstream as [greenlet#525](https://github.com/python-greenlet/greenlet/issues/525).
 
 **Session issues:**
 
@@ -327,6 +328,8 @@ while a container is running.
 
 - If Chrome is installed in a non-standard location, use `--chrome-path /path/to/chrome`
 - Can also set via environment variable: `CHROME_PATH=/path/to/chrome`
+- On macOS and Linux the browser must be at least as new as the one that last opened your profile, and the server refuses the launch otherwise. (Not on Windows: a browser there cannot be asked its version without starting one, so the check is off.) An older browser can silently drop stores a newer one wrote, the saved session among them, and the failure then looks exactly like an expired login. The message names both versions. Going back to the bundled Chromium after running a newer Chrome once is the usual way to meet this; either run the newer browser again, whichever one that was, or run `--login`, which moves the stored session aside and signs in fresh with the browser you have. `--logout` also clears it but discards the old session instead of keeping it recoverable, and it asks for confirmation on the terminal, so it is not usable from a server an MCP client started.
+- Only Chrome, Chromium and Chrome for Testing are compared this way. Forks number themselves differently (Vivaldi is on 7.x, Edge's build number sits far below Chrome's under the same major), so pointing `CHROME_PATH` at one turns the check off rather than producing a refusal nothing could satisfy.
 
 </details>
 
@@ -355,6 +358,7 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 - Claude Desktop starts the bundle immediately; browser setup continues in the background
 - If the Patchright Chromium browser is still downloading, retry the tool after a short wait
 - Managed browser downloads are shared under `~/.linkedin-mcp/patchright-browsers/`
+- *Windows, the bundle exits with `DLL load failed while importing _greenlet`*: install the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist). The published Windows wheels for greenlet 3.3.1 through 3.5.4 need `MSVCP140.dll` from it, and neither the python.org installer nor the `uv`-managed builds carry that DLL. A greenlet built from source can need it at any version. The server names this itself on startup, and only after checking that the loader cannot produce that DLL. Tracked upstream as [greenlet#525](https://github.com/python-greenlet/greenlet/issues/525).
 
 **Login issues:**
 
@@ -384,7 +388,7 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 
 ### Authentication
 
-Docker runs headless (no browser window), so you need to create a browser profile locally first and mount it into the container.
+Docker runs full Chromium headed on a virtual display. No browser window reaches the host, so you still need to create a browser profile locally first and mount it into the container.
 
 **Step 1: Create profile on the host (one-time setup)**
 
@@ -426,7 +430,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 > Docker creates a fresh session on each startup. Sessions may expire over time — run `uvx mcp-server-linkedin@latest --login` again if you encounter authentication issues.
 
 > [!NOTE]
-> **Why can't I run `--login` in Docker?** Docker containers don't have a display server. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
+> **Why can't I run `--login` in Docker?** The container has a virtual display for Chromium, but no viewer that can show it to you or accept the form, 2FA, or captcha. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
 
 ### Docker Setup Help
 
@@ -463,7 +467,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - `--proxy-server URL` - Route the browser through a proxy, as `scheme://host:port`. Set the password via `PROXY_PASSWORD` (no flag, so it stays out of the process list)
 
 > [!NOTE]
-> `--login` and `--no-headless` are not available in Docker (no display server). Use the [uvx setup](#-uvx-setup-recommended---universal) to create profiles.
+> `--login` is not usable in Docker yet: Chromium has a virtual display, but the image has no viewer for completing the login. Docker is already headed by default; `--no-headless` therefore changes nothing. Use the [uvx setup](#-uvx-setup-recommended---universal) to create profiles. The experimental `--daemon` is also ignored in Docker because its owner can outlive the virtual display.
 
 **HTTP Mode Example (for web-based MCP clients):**
 
@@ -571,6 +575,9 @@ belongs behind something that provides it.
 
 - If Chrome is installed in a non-standard location, use `--chrome-path /path/to/chrome`
 - Can also set via environment variable: `CHROME_PATH=/path/to/chrome`
+- On macOS and Linux the browser must be at least as new as the one that last opened your profile, and the server refuses the launch otherwise. (Not on Windows: a browser there cannot be asked its version without starting one, so the check is off.) An older browser can silently drop stores a newer one wrote, the saved session among them, and the failure then looks exactly like an expired login. The message names both versions. Going back to the bundled Chromium after running a newer Chrome once is the usual way to meet this; either run the newer browser again, whichever one that was, or run `--login`, which moves the stored session aside and signs in fresh with the browser you have. `--logout` also clears it but discards the old session instead of keeping it recoverable, and it asks for confirmation on the terminal, so it is not usable from a server an MCP client started.
+- Only Chrome, Chromium and Chrome for Testing are compared this way. Forks number themselves differently (Vivaldi is on 7.x, Edge's build number sits far below Chrome's under the same major), so pointing `CHROME_PATH` at one turns the check off rather than producing a refusal nothing could satisfy.
+- In the documented Docker setup this check does not apply. The container never opens the profile you created with `--login`; it derives its own from your cookies, and by default rebuilds that from scratch on every start, so there is nothing for an older image to downgrade. With `EXPERIMENTAL_PERSIST_DERIVED_RUNTIME` the derived profile is kept, and an image tag that moves backwards then throws it away and re-derives it, again with nothing for you to do. The check matters on the host, where the server opens that profile directly. Not during `--login` itself, which moves the old profile aside before it starts a browser and so can never trip it.
 
 </details>
 
@@ -721,6 +728,8 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 - If Chrome is installed in a non-standard location, use `--chrome-path /path/to/chrome`
 - Can also set via environment variable: `CHROME_PATH=/path/to/chrome`
+- On macOS and Linux the browser must be at least as new as the one that last opened your profile, and the server refuses the launch otherwise. (Not on Windows: a browser there cannot be asked its version without starting one, so the check is off.) An older browser can silently drop stores a newer one wrote, the saved session among them, and the failure then looks exactly like an expired login. The message names both versions. Going back to the bundled Chromium after running a newer Chrome once is the usual way to meet this; either run the newer browser again, whichever one that was, or run `--login`, which moves the stored session aside and signs in fresh with the browser you have. `--logout` also clears it but discards the old session instead of keeping it recoverable, and it asks for confirmation on the terminal, so it is not usable from a server an MCP client started.
+- Only Chrome, Chromium and Chrome for Testing are compared this way. Forks number themselves differently (Vivaldi is on 7.x, Edge's build number sits far below Chrome's under the same major), so pointing `CHROME_PATH` at one turns the check off rather than producing a refusal nothing could satisfy.
 
 </details>
 

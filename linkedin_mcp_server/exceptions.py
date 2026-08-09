@@ -138,6 +138,69 @@ class ProfileRootRefusedError(LinkedInMCPError):
     """
 
 
+class BrowserDowngradeError(LinkedInMCPError):
+    """The browser about to open a profile is older than the one that wrote it.
+
+    Its own class because neither neighbouring recovery is right, and both would
+    do damage. It is not a ``NetworkError``: that path invalidates the browser
+    metadata and reinstalls, which fetches the same old revision and changes
+    nothing. It is not an ``AuthenticationError`` either: that path rotates the
+    profile away, destroying an intact session whose only problem is having been
+    written by a newer browser than the one now asking for it.
+
+    Raised before ``launch_persistent_context``, so the profile is never opened
+    and nothing has migrated by the time anyone reads the message.
+    """
+
+    def __init__(
+        self,
+        *,
+        profile_version: str,
+        browser_version: str,
+        browser_product: str = "",
+        profile_dir: object | None = None,
+    ):
+        self.profile_version = profile_version
+        self.browser_version = browser_version
+        self.browser_product = browser_product
+        self.profile_dir = profile_dir
+        where = f"\nProfile: {profile_dir}" if profile_dir is not None else ""
+        # "a browser reporting", not "Chromium": `Last Version` holds a number
+        # and no product name, so which browser wrote it is genuinely unknown.
+        # The running one names itself, and is named.
+        running = f"{browser_product} {browser_version}".strip()
+        # "The browser profile", never "this LinkedIn profile". This message
+        # surfaces through tools like get_person_profile, where a LinkedIn
+        # profile is a member's page and the collision would read as a claim
+        # about the person being looked up.
+        super().__init__(
+            f"The browser profile this server uses was last opened by a "
+            f"browser reporting {profile_version}, and the browser about to "
+            f"open it is {running}. An older browser can leave stores a newer "
+            f"one wrote unreadable, the saved session among them, so the "
+            f"profile is kept rather than opened."
+            f"{where}\n\n"
+            f"To fix this:\n"
+            f"  Run the newer browser again -- whichever gave you "
+            f"{profile_version}, whether that is a CHROME_PATH, a newer image "
+            f"tag, or the package version that shipped it.\n"
+            f"  Or run with --login, which moves the stored session aside and "
+            f"signs in again with this browser. The old one is kept and can "
+            f"be recovered; --logout would discard it."
+        )
+
+
+class VisualCPPRuntimeUnavailableError(LinkedInMCPError):
+    """greenlet's extension would not load, and neither would the C++ runtime.
+
+    Unavailable rather than missing: absent, wrong-architecture and damaged all
+    arrive as the same ``OSError``, so which one it is stays unknown and the
+    message quotes the loader instead of naming a cause. Its own class because
+    nothing here can install a system DLL, so the only useful response is to say
+    what was asked for and what came back. See ``greenlet_runtime``.
+    """
+
+
 class CookieDecryptionError(LinkedInMCPError):
     """A browser cookie could not be decrypted."""
 
