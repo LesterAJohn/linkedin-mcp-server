@@ -24,6 +24,9 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/patchright
 
 RUN patchright install-deps chromium && \
     patchright install chromium && \
+    chrome_path="$(find /opt/patchright -type f -path '*/chrome-linux64/chrome' | sort | tail -n 1)" && \
+    test -n "$chrome_path" && \
+    ln -sf "$chrome_path" /opt/patchright/chrome && \
     apt-get update && apt-get install -y --no-install-recommends tini && \
     chmod -R 755 /opt/patchright && \
     rm -rf /var/lib/apt/lists/*
@@ -32,5 +35,9 @@ USER pwuser
 
 # tini reaps the chromium subprocesses Patchright orphans onto PID 1; without an
 # init the container leaks zombie chrome-headless processes over its lifetime.
+# The image also publishes /opt/patchright/chrome as a stable symlink to the
+# installed Patchright Chromium binary. Operators that intentionally run a mounted
+# host-captured profile can set CHROME_PATH to that path without knowing the
+# current Patchright revision directory.
 ENTRYPOINT ["tini", "--", "python", "-m", "linkedin_mcp_server"]
 CMD []
