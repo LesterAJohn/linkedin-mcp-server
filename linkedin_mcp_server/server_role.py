@@ -122,11 +122,9 @@ def process_role() -> ServerRole:
 
 #: Set when this process can no longer serve and has to be replaced.
 #:
-#: Only an owner uses it. A single-process server telling its own client to
-#: restart is an instruction someone can follow; a detached owner saying the same
-#: is not, because it outlives the client that started it and the next frontend
-#: attaches straight back to it. So the process that cannot recover has to remove
-#: itself, and the serve loop is the only place that can do it cleanly.
+#: Long-running browser-driving servers use it. A daemon owner polls this
+#: directly, and direct HTTP server mode starts a small monitor so container
+#: restart policies can replace a process that cannot safely reuse its profile.
 _must_stand_down: list[str] = []
 
 
@@ -187,7 +185,8 @@ def a_held_profile_means_this_owner_must_go(lease: Any | None = None) -> None:
     Never raises. The caller is mid-teardown or mid-failure and has its own
     exception to deliver.
     """
-    if process_role() is not ServerRole.OWNER:
+    role = process_role()
+    if not role.drives_browser:
         return
 
     try:

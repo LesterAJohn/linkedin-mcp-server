@@ -2,7 +2,11 @@
 
 import asyncio
 import logging
+import os
+import signal
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -38,12 +42,32 @@ from linkedin_mcp_server.session_state import (
     source_state_path,
 )
 from linkedin_mcp_server.server import ServerRole, create_mcp_server
+from linkedin_mcp_server.server_role import stand_down_reason
 from linkedin_mcp_server.setup import run_profile_creation
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.daemon_proxy import DaemonProxyBackend
 
 logger = logging.getLogger(__name__)
+
+
+def start_direct_stand_down_monitor() -> None:
+    """Exit direct HTTP server mode when the browser profile is wedged."""
+
+    def monitor() -> None:
+        while True:
+            reason = stand_down_reason()
+            if reason is not None:
+                logger.warning("Direct LinkedIn MCP server standing down: %s", reason)
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+            time.sleep(0.5)
+
+    threading.Thread(
+        target=monitor,
+        name="linkedin-direct-stand-down-monitor",
+        daemon=True,
+    ).start()
 
 
 def choose_transport_interactive() -> Literal["stdio", "streamable-http"]:
@@ -541,6 +565,8 @@ def main() -> None:
                 #
                 # Deliberately no host wildcard: it would accept any Host and
                 # reopen the same hole from the other side.
+                if proxy_backend is None:
+                    start_direct_stand_down_monitor()
                 mcp.run(
                     transport=transport,
                     host=config.server.host,

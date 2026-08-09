@@ -743,6 +743,25 @@ class TestAWedgeFromAnywhereFreesTheOwner:
             "an owner stranded by a routine close keeps the profile forever"
         )
 
+    def test_a_held_profile_asks_direct_server_to_stand_down(self):
+        """Direct HTTP servers also need Podman to replace a wedged owner."""
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            a_held_profile_means_this_owner_must_go,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.DIRECT)
+        lease = MagicMock()
+        lease.browser_open = True
+
+        a_held_profile_means_this_owner_must_go(lease)
+
+        assert stand_down_reason() is not None, (
+            "a direct HTTP server with a held profile needs container restart"
+        )
+
     def test_a_free_profile_leaves_the_owner_serving(self):
         """The guard is what keeps this from firing on every ordinary close.
 
