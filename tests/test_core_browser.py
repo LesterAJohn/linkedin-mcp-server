@@ -4,12 +4,14 @@ import asyncio
 import contextlib
 import json
 import os
+import socket
 import time
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from linkedin_mcp_server.core import browser as browser_module
 from linkedin_mcp_server.core.browser import BrowserManager
 
 
@@ -39,6 +41,82 @@ def test_a_user_agent_is_refused_rather_than_applied(tmp_path):
             user_data_dir=tmp_path / "profile",
             user_agent="Mozilla/5.0 (test) Chrome/143.0.0.0",
         )
+
+
+class TestChromiumSingletonCleanup:
+    def _write_singletons(
+        self,
+        profile_dir,
+        *,
+        lock_target="old-container-12345",
+        socket_target="/tmp/missing-chromium/SingletonSocket",
+    ):
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        (profile_dir / "SingletonLock").symlink_to(lock_target)
+        (profile_dir / "SingletonSocket").symlink_to(socket_target)
+        (profile_dir / "SingletonCookie").symlink_to("10001647406132631536")
+
+    def test_stale_foreign_host_singleton_links_are_removed(self, tmp_path):
+        profile_dir = tmp_path / "profile"
+        self._write_singletons(profile_dir)
+
+        assert browser_module._remove_stale_chromium_singletons(profile_dir) is True
+
+        for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            assert not os.path.lexists(profile_dir / name)
+
+    def test_live_same_host_singleton_lock_is_preserved(self, tmp_path, monkeypatch):
+        profile_dir = tmp_path / "profile"
+        self._write_singletons(
+            profile_dir,
+            lock_target=f"{socket.gethostname()}-12345",
+        )
+        monkeypatch.setattr(
+            browser_module, "_process_looks_like_chromium", lambda _pid: True
+        )
+
+        assert browser_module._remove_stale_chromium_singletons(profile_dir) is False
+
+        for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            assert os.path.lexists(profile_dir / name)
+
+    async def test_start_cleans_stale_singletons_before_persistent_launch(
+        self, tmp_path
+    ):
+        profile_dir = tmp_path / "profile"
+        self._write_singletons(profile_dir)
+        recorder = {}
+
+        class _Page:
+            url = "about:blank"
+
+        class _Context:
+            pages = [_Page()]
+
+        class _Chromium:
+            async def launch_persistent_context(self, user_data_dir, **kwargs):
+                recorder["lock_at_launch"] = os.path.lexists(
+                    profile_dir / "SingletonLock"
+                )
+                return _Context()
+
+        class _Playwright:
+            chromium = _Chromium()
+
+            async def stop(self):
+                return None
+
+        async def start():
+            return _Playwright()
+
+        manager = BrowserManager(user_data_dir=profile_dir, headless=False)
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.async_playwright"
+        ) as playwright:
+            playwright.return_value.start = start
+            await manager.start()
+
+        assert recorder["lock_at_launch"] is False
 
 
 class TestGeometry:

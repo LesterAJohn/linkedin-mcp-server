@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import socket
 from pathlib import Path
 from collections.abc import Coroutine
 from typing import Any
@@ -39,6 +40,139 @@ logger = logging.getLogger(__name__)
 _DEFAULT_USER_DATA_DIR = Path.home() / ".linkedin-mcp" / "profile"
 _PRIVATE_FILE_MODE = 0o600
 _CLEANUP_TIMEOUT_SECONDS = 10
+_CHROMIUM_SINGLETON_NAMES = ("SingletonLock", "SingletonSocket", "SingletonCookie")
+_PROFILE_LAUNCH_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _profile_launch_lock(profile_dir: Path) -> asyncio.Lock:
+    """Return the in-process launch lock for one persistent profile path."""
+    key = str(profile_dir.expanduser().resolve(strict=False))
+    lock = _PROFILE_LAUNCH_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _PROFILE_LAUNCH_LOCKS[key] = lock
+    return lock
+
+
+def _parse_singleton_lock_target(target: str) -> tuple[str | None, int | None]:
+    """Parse Chromium's ``<hostname>-<pid>`` SingletonLock target."""
+    owner, separator, pid_text = target.rpartition("-")
+    if not separator or not owner:
+        return None, None
+    try:
+        return owner, int(pid_text)
+    except ValueError:
+        return owner, None
+
+
+def _process_looks_like_chromium(pid: int) -> bool:
+    """Return whether *pid* is alive and appears to be a Chromium process."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+    proc_dir = Path("/proc") / str(pid)
+    if not proc_dir.exists():
+        # On platforms without /proc, the successful os.kill probe is the only
+        # safe answer. Treat the lock as live rather than deleting underneath it.
+        return True
+    try:
+        command = (proc_dir / "cmdline").read_bytes().replace(b"\x00", b" ").decode(
+            "utf-8", errors="ignore"
+        )
+    except PermissionError:
+        return True
+    except OSError:
+        command = ""
+    if not command:
+        try:
+            command = (proc_dir / "comm").read_text(encoding="utf-8", errors="ignore")
+        except PermissionError:
+            return True
+        except OSError:
+            command = ""
+    lowered = command.lower()
+    return any(marker in lowered for marker in ("chrome", "chromium", "patchright"))
+
+
+def _singleton_socket_exists(profile_dir: Path) -> bool:
+    socket_path = profile_dir / "SingletonSocket"
+    try:
+        target = os.readlink(socket_path)
+    except OSError:
+        return socket_path.exists()
+    resolved = Path(target)
+    if not resolved.is_absolute():
+        resolved = profile_dir / resolved
+    return resolved.exists()
+
+
+def _remove_stale_chromium_singletons(profile_dir: Path) -> bool:
+    """Remove Chromium Singleton* files when they clearly belong to a dead run."""
+    profile_dir = profile_dir.expanduser()
+    lock_path = profile_dir / "SingletonLock"
+    try:
+        target = os.readlink(lock_path)
+    except OSError:
+        return False
+
+    owner, pid = _parse_singleton_lock_target(target)
+    current_host = socket.gethostname()
+    socket_exists = _singleton_socket_exists(profile_dir)
+    stale = False
+
+    if owner == current_host and pid is not None:
+        stale = not _process_looks_like_chromium(pid)
+    elif owner and owner != current_host:
+        # Container hostnames change across restarts. If the old Chromium socket
+        # is also gone in this namespace, the singleton triplet is crash debris.
+        stale = not socket_exists
+    else:
+        stale = not socket_exists
+
+    if not stale:
+        logger.info(
+            "Chromium profile singleton lock still appears live: %s -> %s",
+            lock_path,
+            target,
+        )
+        return False
+
+    removed: list[str] = []
+    for name in _CHROMIUM_SINGLETON_NAMES:
+        path = profile_dir / name
+        try:
+            path.unlink()
+            removed.append(name)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            logger.warning("Could not remove stale Chromium %s: %s", path, exc)
+    if removed:
+        logger.warning(
+            "Removed stale Chromium profile singleton files from %s: %s",
+            profile_dir,
+            ", ".join(removed),
+        )
+        return True
+    return False
+
+
+async def _launch_persistent_context_with_profile_guard(
+    chromium: Any,
+    user_data_dir: str,
+    **context_options: Any,
+) -> BrowserContext:
+    """Serialize profile launches and clear stale Chromium singleton debris."""
+    profile_dir = Path(user_data_dir).expanduser()
+    async with _profile_launch_lock(profile_dir):
+        _remove_stale_chromium_singletons(profile_dir)
+        return await chromium.launch_persistent_context(user_data_dir, **context_options)
 
 
 async def _await_deferring_cancels(coro: Coroutine[Any, Any, bool]) -> bool:
@@ -269,7 +403,8 @@ class BrowserManager:
             # AGENTS.md and the measurements in docs/browser-fingerprint.md.
             try:
                 self._context = (
-                    await self._playwright.chromium.launch_persistent_context(
+                    await _launch_persistent_context_with_profile_guard(
+                        self._playwright.chromium,
                         self.user_data_dir,
                         **context_options,
                     )
@@ -325,7 +460,8 @@ class BrowserManager:
                 context_options.update(self._geometry())
                 try:
                     self._context = (
-                        await self._playwright.chromium.launch_persistent_context(
+                        await _launch_persistent_context_with_profile_guard(
+                            self._playwright.chromium,
                             self.user_data_dir,
                             **context_options,
                         )
