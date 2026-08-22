@@ -82,8 +82,11 @@ def _process_looks_like_chromium(pid: int) -> bool:
         # safe answer. Treat the lock as live rather than deleting underneath it.
         return True
     try:
-        command = (proc_dir / "cmdline").read_bytes().replace(b"\x00", b" ").decode(
-            "utf-8", errors="ignore"
+        command = (
+            (proc_dir / "cmdline")
+            .read_bytes()
+            .replace(b"\x00", b" ")
+            .decode("utf-8", errors="ignore")
         )
     except PermissionError:
         return True
@@ -172,7 +175,9 @@ async def _launch_persistent_context_with_profile_guard(
     profile_dir = Path(user_data_dir).expanduser()
     async with _profile_launch_lock(profile_dir):
         _remove_stale_chromium_singletons(profile_dir)
-        return await chromium.launch_persistent_context(user_data_dir, **context_options)
+        return await chromium.launch_persistent_context(
+            user_data_dir, **context_options
+        )
 
 
 async def _await_deferring_cancels(coro: Coroutine[Any, Any, bool]) -> bool:
@@ -402,12 +407,10 @@ class BrowserManager:
             # service workers at all. See the browser identity rules in
             # AGENTS.md and the measurements in docs/browser-fingerprint.md.
             try:
-                self._context = (
-                    await _launch_persistent_context_with_profile_guard(
-                        self._playwright.chromium,
-                        self.user_data_dir,
-                        **context_options,
-                    )
+                self._context = await _launch_persistent_context_with_profile_guard(
+                    self._playwright.chromium,
+                    self.user_data_dir,
+                    **context_options,
                 )
             except Exception as exc:
                 # A headed launch needs somewhere to put a window, and whether
@@ -459,12 +462,10 @@ class BrowserManager:
                 context_options.pop("no_viewport", None)
                 context_options.update(self._geometry())
                 try:
-                    self._context = (
-                        await _launch_persistent_context_with_profile_guard(
-                            self._playwright.chromium,
-                            self.user_data_dir,
-                            **context_options,
-                        )
+                    self._context = await _launch_persistent_context_with_profile_guard(
+                        self._playwright.chromium,
+                        self.user_data_dir,
+                        **context_options,
                     )
                 except Exception as retry_exc:
                     # Logged before it is discarded. The raise below keeps the
