@@ -7,6 +7,7 @@ def reset_singletons():
     from linkedin_mcp_server.bootstrap import reset_bootstrap_for_testing
     from linkedin_mcp_server.config import reset_config
     from linkedin_mcp_server.daemon_liveness import reset_liveness_for_testing
+    from linkedin_mcp_server.debug_trace import reset_trace_state_for_testing
     from linkedin_mcp_server.drivers.browser import reset_browser_for_testing
     from linkedin_mcp_server.profile_lease import reset_leases_for_testing
     from linkedin_mcp_server.server_role import reset_process_role_for_testing
@@ -18,6 +19,7 @@ def reset_singletons():
     # becomes the baseline for the next, where a gap of seconds reads as an
     # owner that was not running.
     reset_liveness_for_testing()
+    reset_trace_state_for_testing()
     reset_browser_for_testing()
     reset_leases_for_testing()
     reset_config()
@@ -34,6 +36,7 @@ def reset_singletons():
     reset_config()
     reset_process_role_for_testing()
     reset_liveness_for_testing()
+    reset_trace_state_for_testing()
 
 
 @pytest.fixture(autouse=True)

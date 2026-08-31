@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import time
+from typing import Any, cast
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
@@ -113,8 +114,8 @@ class TestChromiumSingletonCleanup:
                 return None
 
         manager = BrowserManager(user_data_dir=profile_dir, headless=False)
-        manager._context = _Context()
-        manager._playwright = _Playwright()
+        manager._context = cast(Any, _Context())
+        manager._playwright = cast(Any, _Playwright())
 
         assert await manager.close() is False
 
