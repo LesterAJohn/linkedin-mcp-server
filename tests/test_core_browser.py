@@ -80,6 +80,44 @@ class TestChromiumSingletonCleanup:
         for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
             assert os.path.lexists(profile_dir / name)
 
+    def test_live_singleton_blocks_reopen(self, tmp_path, monkeypatch):
+        profile_dir = tmp_path / "profile"
+        self._write_singletons(
+            profile_dir,
+            lock_target=f"{socket.gethostname()}-12345",
+        )
+        monkeypatch.setattr(
+            browser_module, "_process_looks_like_chromium", lambda _pid: True
+        )
+
+        assert browser_module._chromium_singleton_still_blocks_reopen(profile_dir)
+
+    async def test_close_is_unconfirmed_when_chromium_still_holds_profile(
+        self, tmp_path, monkeypatch
+    ):
+        profile_dir = tmp_path / "profile"
+        self._write_singletons(
+            profile_dir,
+            lock_target=f"{socket.gethostname()}-12345",
+        )
+        monkeypatch.setattr(
+            browser_module, "_process_looks_like_chromium", lambda _pid: True
+        )
+
+        class _Context:
+            async def close(self):
+                return None
+
+        class _Playwright:
+            async def stop(self):
+                return None
+
+        manager = BrowserManager(user_data_dir=profile_dir, headless=False)
+        manager._context = _Context()
+        manager._playwright = _Playwright()
+
+        assert await manager.close() is False
+
     async def test_start_cleans_stale_singletons_before_persistent_launch(
         self, tmp_path
     ):

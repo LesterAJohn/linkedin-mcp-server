@@ -166,6 +166,47 @@ def _remove_stale_chromium_singletons(profile_dir: Path) -> bool:
     return False
 
 
+def _chromium_singleton_still_blocks_reopen(profile_dir: Path) -> bool:
+    """Return whether Chromium still owns *profile_dir* after cleanup.
+
+    ``context.close()`` and ``playwright.stop()`` returning is not quite enough:
+    Chromium can leave a live browser process behind while the Python-side
+    handles are already gone. The next launch then trips Chromium's
+    ``SingletonLock`` and every caller sees a browser-start failure until the
+    server is restarted. Treat that as an unconfirmed shutdown so the existing
+    stand-down path replaces the process instead of continuing in a wedged
+    state.
+    """
+    profile_dir = profile_dir.expanduser()
+    _remove_stale_chromium_singletons(profile_dir)
+
+    lock_path = profile_dir / "SingletonLock"
+    try:
+        target = os.readlink(lock_path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # Chromium uses symlinks here on Linux. If a non-symlink lock remains
+        # and its socket exists, it still blocks a reopen; otherwise it is just
+        # debris the stale cleanup could not attribute.
+        return lock_path.exists() and _singleton_socket_exists(profile_dir)
+
+    owner, pid = _parse_singleton_lock_target(target)
+    current_host = socket.gethostname()
+    if owner == current_host and pid is not None:
+        live = _process_looks_like_chromium(pid)
+    else:
+        live = _singleton_socket_exists(profile_dir)
+
+    if live:
+        logger.error(
+            "Chromium still owns profile singleton after browser close: %s -> %s",
+            lock_path,
+            target,
+        )
+    return live
+
+
 async def _launch_persistent_context_with_profile_guard(
     chromium: Any,
     user_data_dir: str,
@@ -618,6 +659,11 @@ class BrowserManager:
             except Exception as exc:
                 confirmed = False
                 logger.error("Error stopping playwright: %s", exc)
+
+        if confirmed and _chromium_singleton_still_blocks_reopen(
+            Path(self.user_data_dir)
+        ):
+            confirmed = False
 
         logger.info("Browser closed")
         return confirmed
