@@ -244,7 +244,7 @@ uvx mcp-server-linkedin@latest --transport streamable-http --host 127.0.0.1 --po
 
 Runtime server logs are emitted by FastMCP/Uvicorn.
 
-In direct HTTP mode, a long-running server exits when it detects that Chromium did not shut down cleanly and the browser profile is still held. This lets container restart policies replace the process instead of serving repeated `browser is busy` errors from an unrecoverable profile state.
+In direct HTTP mode, a long-running server exits when it detects that Chromium did not shut down cleanly and the browser profile is still held. Browser shutdown is treated as unconfirmed if Chromium SingletonLock or SingletonSocket state still indicates a live owner after Patchright and Playwright report a successful close. This lets container restart policies replace the process instead of serving repeated `browser is busy` or profile-in-use errors from an unrecoverable profile state.
 
 Tool calls are serialized to protect the shared LinkedIn browser session, both
 within one server process and across separate ones. If you run several MCP
