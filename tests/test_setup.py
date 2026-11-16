@@ -172,12 +172,12 @@ async def test_interactive_login_forwards_all_browser_params(monkeypatch, tmp_pa
 
 @pytest.mark.asyncio
 async def test_login_keeps_webrtc_on_the_proxy(monkeypatch, tmp_path):
-    """The login browser needs the WebRTC restriction as much as scraping does.
+    """The login browser needs the WebRTC restriction as much as page reading does.
 
     This is the path that matters most. The login is where the session is
     created, so a leak here has been attached to that session from its first
     moment — and this path used to build its own launch options, which is
-    exactly how a setting ends up applying to scraping but not to login.
+    exactly how a setting ends up applying to page reading but not to login.
     """
     browser = _make_browser(export_cookies=True)
     captured_kwargs: dict = {}
@@ -219,33 +219,6 @@ async def test_interactive_login_passes_slow_mo_to_browser_manager(
     await interactive_login(tmp_path / "profile")
 
     assert captured_kwargs.get("slow_mo") == 250
-
-
-@pytest.mark.asyncio
-async def test_login_never_overrides_the_user_agent(monkeypatch, tmp_path):
-    """No user agent reaches BrowserManager, even from a config carrying one.
-
-    ``BrowserConfig.user_agent`` still exists, because the daemon's
-    configuration fingerprint hashes it and removing a field there breaks owner
-    turnover. Nothing may read it: the login is where the session is minted, so
-    a UA applied here would be the one every later contradiction is measured
-    against.
-    """
-    browser = _make_browser(export_cookies=True)
-    captured_kwargs: dict = {}
-
-    def fake_browser_manager(**kwargs):
-        captured_kwargs.update(kwargs)
-        return _BrowserContextManager(browser)
-
-    config = AppConfig()
-    config.browser.user_agent = "CustomAgent/1.0"
-
-    _patch_login_deps(monkeypatch, browser_factory=fake_browser_manager, config=config)
-
-    await interactive_login(tmp_path / "profile")
-
-    assert "user_agent" not in captured_kwargs
 
 
 @pytest.mark.asyncio
@@ -487,7 +460,7 @@ def test_rotate_shielded_does_not_wedge_event_loop_shutdown(tmp_path):
 
 @pytest.mark.asyncio
 async def test_interactive_login_forwards_the_proxy(monkeypatch, tmp_path):
-    """The login browser must use the same proxy as later scrapes.
+    """The login browser must use the same proxy as later reads.
 
     A session created from one address and then used from another is exactly
     what triggers LinkedIn's security checkpoint, so --login cannot be allowed
@@ -571,8 +544,8 @@ class TestTheExplicitCommandsStayUnguarded:
         from linkedin_mcp_server.config import set_config
         from linkedin_mcp_server.config.schema import AppConfig
 
-        # Installed rather than loaded: the handler calls get_config(), which
-        # parses sys.argv, and under pytest that is pytest's own command line.
+        # Installed because the handler reads process-global config and this
+        # test needs the import selector below to be present there.
         config = AppConfig()
         config.server.import_from_browser = "auto"
         set_config(config)

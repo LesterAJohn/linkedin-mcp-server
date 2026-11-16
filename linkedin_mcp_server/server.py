@@ -23,22 +23,26 @@ from linkedin_mcp_server import __version__
 from linkedin_mcp_server.bootstrap import (
     get_runtime_policy,
     initialize_bootstrap,
+    report_retained_browser_revisions_if_ready,
     start_background_browser_setup_if_needed,
+    stop_background_browser_setup,
 )
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.drivers.browser import (
     close_browser,
     watch_for_handoff_requests,
 )
-from linkedin_mcp_server.daemon_auth import (
-    FrontendAuthRepairMiddleware,
-    OwnerAuthSignalMiddleware,
-)
-from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.daemon.auth_repair import OwnerAuthSignalMiddleware
+from linkedin_mcp_server.error_handler import ErrorCodeMiddleware, raise_tool_error
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
-from linkedin_mcp_server.server_role import ServerRole, set_process_role
+from linkedin_mcp_server.server_role import (
+    ServerRole,
+    process_role,
+    set_process_role,
+)
+from linkedin_mcp_server.session_status import session_status
 from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
@@ -48,9 +52,29 @@ from linkedin_mcp_server.tools.person import register_person_tools
 from linkedin_mcp_server.tools.post import register_post_tools
 
 if TYPE_CHECKING:
-    from linkedin_mcp_server.daemon_proxy import DaemonProxyBackend
+    from linkedin_mcp_server.daemon.discovery import Unanswered
+    from linkedin_mcp_server.daemon.proxy import DaemonProxyBackend
 
 logger = logging.getLogger(__name__)
+
+
+# For clients that never load the plugin skill. Every client reads this on
+# every turn, so it holds only lines that measurably changed what cheap
+# client models did (Claude Haiku 5.5, GPT-5.6 Terra). Rules they already
+# follow unprompted, such as reading only what a request needs, are left out,
+# and a generic "retry once" made Haiku retry while setup was still running.
+_SERVER_INSTRUCTIONS = """\
+send_message and connect_with_person act for the user. Use them only for the
+exact action, recipient and text the user approved; when the user asks for a
+draft, or for something these tools cannot do, reply with the text instead. If
+a write's outcome is unknown, ask the user to check LinkedIn before acting
+again.
+
+Report what the tools returned, and say when a result may be incomplete.
+
+If LinkedIn waits for a captcha or other verification, ask the user to
+complete it in the browser, then continue when they say so.
+"""
 
 
 class _StaticTokenAuth(TokenVerifier):
@@ -94,42 +118,54 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
     del app
     logger.info("LinkedIn MCP Server starting...")
     initialize_bootstrap(get_runtime_policy())
-    await start_background_browser_setup_if_needed()
-    # Hands the browser to another process that asks for it, and closes it when
-    # idle. Both need a timer: once tool calls stop arriving, nothing else would
-    # ever notice a waiter.
-    handoff_watch = asyncio.create_task(
-        watch_for_handoff_requests(), name="linkedin-profile-handoff"
-    )
+    handoff_watch: asyncio.Task[None] | None = None
     try:
+        # A detached owner must become attachable before it starts any managed
+        # installer descendants. Its first browser-backed tool starts setup through
+        # the ordinary readiness gate; a direct server keeps the eager install.
+        if process_role() is ServerRole.OWNER:
+            report_retained_browser_revisions_if_ready()
+        else:
+            await start_background_browser_setup_if_needed()
+        # Hands the browser to another process that asks for it, and closes it when
+        # idle. Both need a timer: once tool calls stop arriving, nothing else would
+        # ever notice a waiter.
+        handoff_watch = asyncio.create_task(
+            watch_for_handoff_requests(), name="linkedin-profile-handoff"
+        )
         yield {}
     finally:
         logger.info("LinkedIn MCP Server shutting down...")
-        handoff_watch.cancel()
         try:
-            try:
-                await handoff_watch
-            except asyncio.CancelledError:
-                # Only the cancellation we just asked for is ours to absorb.
-                # While the watcher winds down, one aimed at this task arrives
-                # as the same exception, and a bare pass would swallow it,
-                # leaving whoever asked us to stop with a teardown that
-                # reported success. cancelling() counts the requests made
-                # against *this* task, which is what tells the two apart.
-                task = asyncio.current_task()
-                if task is not None and task.cancelling():
-                    raise
-            except Exception:
-                # A poller that already died re-raises here. Swallowing it keeps
-                # shutdown on course; leaving Chromium running on the shared
-                # profile is the corruption this whole mechanism exists to
-                # prevent, and it matters more than the reason the poll failed.
-                logger.warning("Profile handoff watcher failed", exc_info=True)
+            if handoff_watch is not None:
+                handoff_watch.cancel()
+                try:
+                    await handoff_watch
+                except asyncio.CancelledError:
+                    # Only the cancellation we just asked for is ours to absorb.
+                    # While the watcher winds down, one aimed at this task arrives
+                    # as the same exception, and a bare pass would swallow it,
+                    # leaving whoever asked us to stop with a teardown that
+                    # reported success. cancelling() counts the requests made
+                    # against *this* task, which is what tells the two apart.
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise
+                except Exception:
+                    # A poller that already died re-raises here. Swallowing it keeps
+                    # shutdown on course; leaving Chromium running on the shared
+                    # profile is the corruption this whole mechanism exists to
+                    # prevent, and it matters more than the reason the poll failed.
+                    logger.warning("Profile handoff watcher failed", exc_info=True)
         finally:
-            # In a finally, not after the except, so a BaseException the poller
-            # raised still closes the browser on its way out. Those are not ours
-            # to swallow, but they are also no reason to abandon the profile.
-            await close_browser()
+            # Setup is owned by this lifespan. This also covers cancellation while
+            # direct-server startup is still waiting on its shared readiness task.
+            try:
+                await stop_background_browser_setup()
+            finally:
+                # A BaseException from either background task still closes the
+                # browser; it is no reason to abandon the shared profile.
+                await close_browser()
 
 
 def create_mcp_server(
@@ -138,6 +174,7 @@ def create_mcp_server(
     role: ServerRole = ServerRole.DIRECT,
     auth_token: str | None = None,
     proxy_backend: "DaemonProxyBackend | None" = None,
+    silent_owner: "Unanswered | None" = None,
 ) -> FastMCP:
     """Create and configure the MCP server with all LinkedIn tools.
 
@@ -155,6 +192,9 @@ def create_mcp_server(
     using it. The two credentials are kept apart on purpose and must not be
     conflated: *auth_token* is what an owner *demands* of callers, while the
     backend's token is what a proxy *presents* to one.
+
+    *silent_owner* is the shared owner a Direct server fell back from because
+    it did not answer the election, named when the profile stays busy.
     """
     if auth_token is not None and role is not ServerRole.OWNER:
         # A token on a stdio server protects nothing — there is no port to
@@ -174,6 +214,12 @@ def create_mcp_server(
         # Only a proxy forwards. Accepting an owner here would mean a server that
         # was handed a bearer token for a shared browser and quietly ignored it.
         raise ValueError(f"Only a proxy forwards to an owner, not {role.value}")
+    if silent_owner is not None and role is not ServerRole.DIRECT:
+        # Only a Direct server falls back from an owner; an owner or a proxy
+        # naming one would explain its own busy browser by somebody else.
+        raise ValueError(
+            f"Only a Direct server falls back from an owner, not {role.value}"
+        )
 
     # The role is also process state, because the auth gates live in `bootstrap`
     # and are reached from a tool body with no server to ask (`server_role`).
@@ -190,6 +236,10 @@ def create_mcp_server(
     mcp = FastMCP(
         "mcp-server-linkedin",
         version=__version__,
+        # Before any role wiring, and not only on a role that drives a browser.
+        # A proxy registers no local tools, but it is the server the client
+        # initializes, so gating this would leave that client with no rules.
+        instructions=_SERVER_INSTRUCTIONS,
         # Selected here rather than gated inside, because for a proxy every step
         # of it is wrong: it would install a Chromium this process never opens,
         # and then claim to be closing a browser it never had.
@@ -197,6 +247,9 @@ def create_mcp_server(
         mask_error_details=True,
         auth=_StaticTokenAuth(auth_token) if auth_token is not None else None,
     )
+    # First, so it is the outermost layer on every role: everything inside it
+    # still sees a failure as the exception it raised.
+    mcp.add_middleware(ErrorCodeMiddleware())
     # Added before the serializing middleware below, which makes it the outer one.
     # An inner position would work: `close_browser` does not consult the in-flight
     # count, so quiescence succeeds from there, and the lease reference the inner
@@ -211,42 +264,36 @@ def create_mcp_server(
         # waiting its turn is the commonest way to end up with work nobody
         # wants. Inside, a call would only become cancellable once it already
         # had the browser.
-        from linkedin_mcp_server.daemon_liveness import OwnerCallLivenessMiddleware
+        from linkedin_mcp_server.daemon.liveness import OwnerCallLivenessMiddleware
 
         mcp.add_middleware(OwnerCallLivenessMiddleware())
     # The other half, and only ever on the process that has a user in front of it.
     if role is ServerRole.PROXY:
-        # Handed the same budget every tool here is given, rather than reading it
-        # from the configuration singleton. The two agree for a server `cli_main`
-        # built, which loaded that configuration first, and need not for one
-        # constructed directly: measured at `tool_timeout=1.2` with no
-        # configuration loaded, the repair budgeted itself 149.8 seconds of a
-        # 1.2-second call, and the first read of an unloaded singleton parses
-        # whatever `sys.argv` happens to hold.
-        mcp.add_middleware(FrontendAuthRepairMiddleware(tool_timeout=tool_timeout))
-        # After the repair, which keeps that one outermost. The order decides how
-        # the two compose: a call and the replay a sign-in triggers each get
-        # their own liveness wrapper, rather than one wrapper around the pair.
-        # The other way round, an owner that departed between the two would leave
-        # the replay unrecoverable.
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
-            FrontendOwnerRecoveryMiddleware,
+            FrontendCallMiddleware,
+            call_budget,
         )
 
         assert proxy_backend is not None  # the role check above established it
-        mcp.add_middleware(FrontendOwnerRecoveryMiddleware(proxy_backend))
-        # Innermost of the three, which is what makes a replay behave: a call the
-        # recovery middleware runs again enters here a second time and gets its
-        # own identifier and its own heartbeats, against whichever owner it is
-        # talking to now.
+        # Budgeted from the timeout every tool here is given, rather than from
+        # the configuration singleton. The two agree for a server `cli_main`
+        # built, which loaded that configuration first, and need not for one
+        # constructed directly.
+        mcp.add_middleware(
+            FrontendCallMiddleware(proxy_backend, budget=call_budget(tool_timeout))
+        )
+        # Inside the call's own middleware, which is what makes a repeat behave:
+        # every attempt it makes, a retry or the replay after a sign-in, enters
+        # here afresh and gets its own identifier and its own heartbeats,
+        # against whichever owner it is talking to now.
         mcp.add_middleware(FrontendCallHeartbeatMiddleware(proxy_backend))
     # Profile ownership belongs to whoever launches Chromium. A process that
     # only forwards calls must not take the lease: it would either block itself
     # until its own timeout, or take the lease and leave the process that
     # actually needs it waiting for one held by a caller that never uses it.
     if role.drives_browser:
-        mcp.add_middleware(SequentialToolExecutionMiddleware())
+        mcp.add_middleware(SequentialToolExecutionMiddleware(silent_owner=silent_owner))
     # The notice is appended to one tool result per process, so it belongs
     # wherever a user reads results. On a shared owner it would reach whichever
     # client happened to call first and nobody after that, however many clients
@@ -255,10 +302,16 @@ def create_mcp_server(
         mcp.add_middleware(UpdateNoticeMiddleware())
 
     if proxy_backend is not None:
-        from linkedin_mcp_server.daemon_proxy import create_proxy_provider
+        from linkedin_mcp_server.daemon.forwarder import (
+            OwnerForwarder,
+            ResourcesAnsweredHere,
+        )
+        from linkedin_mcp_server.daemon.proxy import call_budget
 
+        # Each request on the hop gets the call's whole budget, so the owner,
+        # whose own tool timeout is shorter, reports a tool that timed out.
         mcp.add_provider(
-            create_proxy_provider(proxy_backend, tool_timeout=tool_timeout)
+            OwnerForwarder(proxy_backend, timeout=call_budget(tool_timeout))
         )
         # Not the default, which is "warn": a failing provider is logged and
         # skipped, and for a server whose *only* provider this is, that turns a
@@ -266,6 +319,7 @@ def create_mcp_server(
         # 3.4.4 — `tools/list` returned `[]` and the call that followed failed as
         # an unknown tool. A transport failure has to look like one.
         mcp.provider_error_strategy = "raise"
+        mcp.add_middleware(ResourcesAnsweredHere())
 
     # Every local registration below drives Chromium, so a proxy takes none of
     # them and serves the owner's through the provider above instead.
@@ -312,5 +366,31 @@ def create_mcp_server(
                 }
             except Exception as e:
                 raise_tool_error(e, "close_session")  # NoReturn
+
+        @mcp.tool(
+            timeout=tool_timeout,
+            title="Get Session Status",
+            annotations={"readOnlyHint": True, "openWorldHint": False},
+            tags={"session"},
+        )
+        async def get_session_status() -> dict[str, Any]:
+            """Report local saved-session and serving-process state for requested diagnostics.
+
+            Reads local observations without opening a browser, starting setup or login,
+            or contacting LinkedIn. Stored files do not prove current authentication.
+            In shared-browser mode these observations belong to the owner, not to a
+            frontend running a login. It answers during browser work without refreshing
+            the browser idle timer. Use ordinary LinkedIn tools directly for their
+            requested work rather than adding a status preflight. Do not use this as
+            proof that LinkedIn will accept a request or as a preflight for ordinary
+            tools. Requires access to the configured local session paths and process
+            state; it has no LinkedIn environment selector. Common failures include
+            unreadable session files or unavailable process observations. Example
+            input: {}. Response shape: {"session": {...}, "server": {...}}.
+            """
+            try:
+                return session_status()
+            except Exception as e:
+                raise_tool_error(e, "get_session_status")  # NoReturn
 
     return mcp

@@ -18,17 +18,18 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       should-release: ${{ steps.check.outputs.should-release }}
       new-version: ${{ steps.check.outputs.new-version }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 2  # Need to compare with previous commit
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 
@@ -55,10 +56,94 @@ jobs:
             echo "should-release=false" >> $GITHUB_OUTPUT
           fi
 
-  # Builds the distributions without any publishing or administration
-  # credentials: the build backend is third-party code and must not run where
-  # it could reach the OIDC identity. Its output travels to the publishing job
-  # as an artifact.
+      # The release publishes and tags this commit as it is, so every file
+      # that repeats the version has to agree with pyproject.toml already. CI
+      # checks the same on the bump pull request; this repeats it on the commit
+      # being released, before anything is built or published.
+      - name: Check the versioned files agree
+        if: steps.check.outputs.should-release == 'true'
+        run: python3 scripts/prepare_release.py --check
+
+      # Composed here, before build and publish-pypi, so a CHANGELOG without a
+      # section for this version stops the release while nothing exists yet
+      # that would have to be withdrawn. The previous version is read on its
+      # own and an unreadable parent manifest fails the step. The author of
+      # every pull request the section links is looked up for its credit, and
+      # a failed lookup fails the step too. An author other than the owner or
+      # a bot whose merged pull requests all sit in this section is searched
+      # for and named as a new contributor.
+      - name: Compose release notes
+        if: steps.check.outputs.should-release == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.new-version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PREVIOUS=$(git show HEAD~1:pyproject.toml | python3 -c \
+            'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["project"]["version"])')
+          echo "Previous version: $PREVIOUS"
+          git ls-remote --exit-code --tags origin "refs/tags/v$PREVIOUS"
+          PULLS=$(python3 scripts/compose_release_notes.py --list-pull-requests \
+            --changelog docs/CHANGELOG.md \
+            --version "$VERSION" \
+            --repository "$GITHUB_REPOSITORY")
+          : > "$RUNNER_TEMP/pr-authors.txt"
+          for N in $PULLS; do
+            LOGIN=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$N" --jq .user.login)
+            printf '%s %s\n' "$N" "$LOGIN" >> "$RUNNER_TEMP/pr-authors.txt"
+          done
+          python3 -c 'import json, sys; print(json.dumps(dict(line.split() for line in sys.stdin)))' \
+            < "$RUNNER_TEMP/pr-authors.txt" > "$RUNNER_TEMP/pr-authors.json"
+          OWNER=${GITHUB_REPOSITORY%%/*}
+          cut -d' ' -f2 "$RUNNER_TEMP/pr-authors.txt" | sort -u > "$RUNNER_TEMP/authors.txt"
+          : > "$RUNNER_TEMP/first-contributors.txt"
+          # Read on fd 3, so nothing inside the loop can consume the list.
+          while read -r LOGIN <&3; do
+            case "$LOGIN" in *'[bot]') continue ;; esac
+            if printf '%s\n' "$LOGIN" | grep -qixF "$OWNER"; then continue; fi
+            # Search allows 30 requests a minute; stay under it however many
+            # authors a release credits.
+            sleep 2
+            MERGED=$(gh api -X GET search/issues \
+              -f q="repo:$GITHUB_REPOSITORY is:pr is:merged author:$LOGIN" \
+              -f per_page=100 \
+              --jq '[.incomplete_results, .total_count, .items[].number] | map(tostring) | join(" ")')
+            # Only a complete search that finds this release's pull request and
+            # nothing older names a first contribution; a search that timed out
+            # or found nothing leaves the author unmarked.
+            FIRST=$(python3 -c 'import sys; incomplete, total, *merged = sys.argv[1].split(); print(incomplete == "false" and bool(merged) and int(total) <= 100 and set(merged) <= set(sys.argv[2].split()))' \
+              "$MERGED" "$PULLS")
+            if [ "$FIRST" = True ]; then
+              echo "$LOGIN" >> "$RUNNER_TEMP/first-contributors.txt"
+            fi
+          done 3< "$RUNNER_TEMP/authors.txt"
+          python3 -c 'import json, sys; print(json.dumps(sys.stdin.read().split()))' \
+            < "$RUNNER_TEMP/first-contributors.txt" > "$RUNNER_TEMP/first-contributors.json"
+          python3 scripts/compose_release_notes.py \
+            --changelog docs/CHANGELOG.md \
+            --template .github/RELEASE_NOTES_TEMPLATE.md \
+            --fragments-dir changelog.d \
+            --version "$VERSION" \
+            --previous-version "$PREVIOUS" \
+            --repository "$GITHUB_REPOSITORY" \
+            --pr-authors "$RUNNER_TEMP/pr-authors.json" \
+            --first-contributors "$RUNNER_TEMP/first-contributors.json" \
+            --pyproject pyproject.toml \
+            --output RELEASE_NOTES.md
+
+      - name: Upload release notes
+        if: steps.check.outputs.should-release == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  # Builds the distributions without any publishing credentials: the build
+  # backend is third-party code and must not run where it could reach the OIDC
+  # identity. Its output travels to the publishing job as an artifact.
   build:
     needs: check-version-bump
     if: needs.check-version-bump.outputs.should-release == 'true'
@@ -66,22 +151,22 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 
-      # build-constraints.txt pins the build backend to a hashed version, so a
+      # requirements/build-constraints.txt pins the build backend to a hashed version, so a
       # tampered setuptools release cannot slip into the distributions. The
       # requirement in pyproject.toml stays a lower bound, because an exact pin
       # there would be baked into every published sdist.
       - name: Build package distributions
         run: |
-          uv build --no-sources --build-constraint build-constraints.txt --require-hashes
+          uv build --no-sources --build-constraint requirements/build-constraints.txt --require-hashes
           echo "Built package distributions:"
           ls -lh dist/
 
@@ -92,7 +177,7 @@ jobs:
       # uv cache save can still fail it. Artifacts are immutable, so overwrite
       # keeps a retry from tripping over the one the failed attempt wrote.
       - name: Upload distributions
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-package-distributions
           path: dist/
@@ -100,9 +185,9 @@ jobs:
           overwrite: true
           retention-days: 7
 
-  # PyPI is the cutover-critical artifact: publish first so a failure in any
-  # later job (Docker build, MCPB pack) cannot leave the README pointing at a
-  # package version that does not exist yet.
+  # The tag and the GitHub release wait for this job, so neither names a
+  # package version that does not exist yet. Docker publishes beside it, each
+  # behind its own environment.
   #
   # This job holds the OIDC identity of the project, so it runs no repository
   # code: no checkout, no build, only the artifact download and the upload.
@@ -116,139 +201,94 @@ jobs:
       id-token: write  # Required for PyPI Trusted Publishing
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: python-package-distributions
           path: dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           print-hash: true
           verbose: true
           skip-existing: true
 
-  # Writes the released version into the repository and tags it. Runs nothing
-  # but checkout and the tools the runner ships with, so the admin token never
-  # shares a job with a package manager.
-  prepare-release:
+  # Tags the commit this run was triggered by. The bump pull request carries
+  # every versioned file, so that commit is already the release and nothing is
+  # committed here. Runs after PyPI, so a tag never names a version that failed
+  # to publish. Holds only the job's own token and runs no package manager.
+  tag:
     needs: [check-version-bump, publish-pypi]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.check-version-bump.outputs.new-version }}
     permissions:
       contents: write
-    outputs:
-      release-sha: ${{ steps.release-sha.outputs.release-sha }}
     steps:
-      # The only checkout that keeps its credentials: this job pushes the
-      # version commit and the tag. fetch-depth: 0 brings the existing tags in
-      # for the duplicate check below.
+      # The only checkout that keeps its credentials: this job pushes the tag.
       - name: Checkout code
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 # zizmor: ignore[artipacked]
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 # zizmor: ignore[artipacked]
         with:
-          fetch-depth: 0
+          ref: ${{ github.sha }}
 
-      - name: Update manifest.json and docker-compose.yml version
-        run: |
-          set -e
-          sed -i 's/"version": ".*"/"version": "'$VERSION'"/' manifest.json
-          sed -i 's/stickerdaniel\/linkedin-mcp-server:[^ ]*/stickerdaniel\/linkedin-mcp-server:'$VERSION'/' docker-compose.yml
-          echo "✅ Updated manifest.json and docker-compose.yml to version $VERSION"
-
-      - name: Remove branch protection (temporary)
-        run: |
-          gh api repos/${{ github.repository }}/branches/main/protection \
-            --method DELETE
-        env:
-          GH_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
-
-      - name: Commit version updates
-        run: |
-          set -e
-          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add manifest.json docker-compose.yml
-          if git diff --staged --quiet; then
-            echo "ℹ️ No changes to commit"
-          else
-            git commit -m "chore: update manifest.json and docker-compose.yml to v$VERSION [skip ci]"
-            git push origin main
-            echo "✅ Committed version updates"
-          fi
-
-      - name: Restore branch protection
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
-          PAYLOAD: >-
-            {
-              "required_status_checks": {
-                "strict": true,
-                "checks": [
-                  {"context": "lint-and-check", "app_id": 15368},
-                  {"context": "test", "app_id": 15368}
-                ]
-              },
-              "enforce_admins": true,
-              "required_pull_request_reviews": {
-                "dismiss_stale_reviews": false,
-                "require_code_owner_reviews": false,
-                "required_approving_review_count": 0
-              },
-              "restrictions": null
-            }
-        run: |
-          echo "$PAYLOAD" | gh api repos/${{ github.repository }}/branches/main/protection \
-            --method PUT \
-            --input -
-
+      # A rerun finds the tag it pushed before and succeeds. A tag on any
+      # other commit fails the job, so a release never reuses a version that
+      # already names different code. `ls-remote --exit-code` answers 2 when
+      # nothing matches. Asking for the peeled ref as well lists the commit an
+      # annotated tag points at, after the tag object, so the last line is the
+      # commit for either kind of tag.
       - name: Create release tag
         run: |
-          set -e
-          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-
-          if git tag -l "v$VERSION" | grep -q "v$VERSION"; then
-            echo "⚠️ Tag v$VERSION already exists, skipping tag creation"
+          set -euo pipefail
+          TAG="v$VERSION"
+          STATUS=0
+          REMOTE=$(git ls-remote --exit-code --tags origin \
+            "refs/tags/$TAG" "refs/tags/$TAG^{}") || STATUS=$?
+          if [ "$STATUS" -eq 2 ]; then
+            git tag "$TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$TAG"
+            echo "Created and pushed tag $TAG at $GITHUB_SHA"
+          elif [ "$STATUS" -ne 0 ]; then
+            exit "$STATUS"
           else
-            git tag "v$VERSION"
-            git push origin "v$VERSION"
-            echo "✅ Created and pushed tag v$VERSION"
+            EXISTING=$(printf '%s\n' "$REMOTE" | tail -n 1 | cut -f 1)
+            if [ "$EXISTING" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $TAG points at $EXISTING, not $GITHUB_SHA"
+              exit 1
+            fi
+            echo "Tag $TAG already points at $GITHUB_SHA"
           fi
 
-      # The Docker image and the MCP bundle are built from the commit that
-      # carries the updated manifest.json and docker-compose.yml, so the jobs
-      # below check out this SHA instead of the one that triggered the run.
-      - name: Publish the released commit
-        id: release-sha
-        run: echo "release-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
+  # The Docker Hub credentials live in the docker environment, so this job is
+  # the only one that receives them, and it waits for approval there beside
+  # publish-pypi. It builds the commit this run was triggered by, the same one
+  # PyPI receives and the tag names.
   docker:
-    needs: [check-version-bump, prepare-release]
+    needs: [check-version-bump, build]
     runs-on: ubuntu-latest
+    environment: docker
     env:
       VERSION: ${{ needs.check-version-bump.outputs.new-version }}
     permissions:
       contents: read
     steps:
       - name: Checkout released commit
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.prepare-release.outputs.release-sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build and push Docker images
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           push: true
@@ -268,7 +308,8 @@ jobs:
           readme-filepath: docs/docker-hub.md
 
   build-mcpb:
-    needs: [check-version-bump, prepare-release]
+    needs: check-version-bump
+    if: needs.check-version-bump.outputs.should-release == 'true'
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.check-version-bump.outputs.new-version }}
@@ -277,9 +318,9 @@ jobs:
       contents: read
     steps:
       - name: Checkout released commit
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.prepare-release.outputs.release-sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Set up Bun
@@ -291,28 +332,22 @@ jobs:
           bunx "@anthropic-ai/mcpb@$MCPB_VERSION" pack .
           mv linkedin-mcp-server.mcpb linkedin-mcp-server-v$VERSION.mcpb
 
-      - name: Generate release notes
-        run: |
-          envsubst < RELEASE_NOTES_TEMPLATE.md > RELEASE_NOTES.md
-          echo "✅ Generated release notes from template"
-
       # Overwrites for the same reason as the distributions upload: the bun
       # cache save runs after this and can fail the job around it.
       - name: Upload release assets
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: github-release-assets
-          path: |
-            linkedin-mcp-server-v${{ env.VERSION }}.mcpb
-            RELEASE_NOTES.md
+          path: linkedin-mcp-server-v${{ env.VERSION }}.mcpb
           if-no-files-found: error
           overwrite: true
           retention-days: 7
 
-  # Waits for Docker so the release never announces an image that failed to
-  # push. Runs no repository code, only the artifact download and the release.
+  # Waits for the tag, which follows PyPI, and for Docker, so the release never
+  # announces a package or an image that failed to publish. Runs no repository
+  # code, only the artifact download and the release.
   create-github-release:
-    needs: [check-version-bump, docker, build-mcpb]
+    needs: [check-version-bump, tag, docker, build-mcpb]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.check-version-bump.outputs.new-version }}
@@ -320,19 +355,24 @@ jobs:
       contents: write
     steps:
       - name: Download release assets
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: github-release-assets
+
+      - name: Download release notes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
 
       - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           tag_name: v${{ env.VERSION }}
           files: |
             *.mcpb
-          generate_release_notes: true
+          generate_release_notes: false
           draft: false
           prerelease: false
           name: "v${{ env.VERSION }}"

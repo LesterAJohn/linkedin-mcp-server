@@ -6,18 +6,21 @@ from fastmcp.exceptions import ToolError
 from linkedin_mcp_server.core.exceptions import (
     NetworkError,
     ProfileNotFoundError,
+    InvalidReferenceError,
     ProxyConnectionError,
     RateLimitError,
-    ScrapingError,
+    PageReadError,
 )
-from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.error_handler import CodedToolError, raise_tool_error
 from linkedin_mcp_server.exceptions import (
     AuthenticationInProgressError,
     AuthMissingOnOwnerError,
     AuthStaleOnOwnerError,
     BrowserBinaryMissingError,
+    BrowserSetupFailedError,
     CredentialsNotFoundError,
     LinkedInMCPError,
+    OwnerStandingDownError,
     SessionExpiredError,
 )
 
@@ -123,16 +126,38 @@ def test_raises_tool_error_for_browser_binary_missing():
         )
 
 
-def test_raises_tool_error_for_scraping_error():
-    with pytest.raises(ToolError, match="Scraping failed"):
-        raise_tool_error(ScrapingError("bad html"))
+def test_setup_failure_says_the_retry_starts_the_next_attempt():
+    with pytest.raises(ToolError) as caught:
+        raise_tool_error(BrowserSetupFailedError("the mirror refused"))
+
+    surfaced = str(caught.value)
+    assert "the mirror refused" in surfaced
+    assert "Retry this tool to start" in surfaced
+    assert "has started" not in surfaced
 
 
-def test_raises_tool_error_for_base_scraper_exception():
-    from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+def test_owner_stand_down_keeps_its_replacement_guidance():
+    message = (
+        "This daemon owner is restarting before it can serve this request. Call "
+        "this tool again so the replacement owner can continue."
+    )
 
-    with pytest.raises(ToolError, match="generic scraper error"):
-        raise_tool_error(LinkedInScraperException("generic scraper error"))
+    with pytest.raises(ToolError) as caught:
+        raise_tool_error(OwnerStandingDownError(message))
+
+    assert str(caught.value) == message
+
+
+def test_raises_tool_error_for_page_read_error():
+    with pytest.raises(ToolError, match="Could not read the page"):
+        raise_tool_error(PageReadError("bad html"))
+
+
+def test_raises_tool_error_for_base_operation_error():
+    from linkedin_mcp_server.core.exceptions import LinkedInOperationError
+
+    with pytest.raises(ToolError, match="generic operation error"):
+        raise_tool_error(LinkedInOperationError("generic operation error"))
 
 
 def test_raises_tool_error_for_linkedin_mcp_error():
@@ -221,6 +246,46 @@ def test_proxy_error_skips_issue_diagnostics(monkeypatch):
 
     with pytest.raises(ToolError):
         raise_tool_error(ProxyConnectionError("proxy gate:7000 is unreachable"))
+
+
+def test_invalid_reference_surfaces_the_correction_verbatim():
+    # It subclasses LinkedInOperationError, so the specific branch has to come
+    # first; otherwise the catch-all handles it and the correction arrives buried.
+    #
+    # Compared whole rather than searched for a substring: the catch-all keeps
+    # the message and appends to it, so `match=` passes either way and the word
+    # "verbatim" in this name would guard nothing.
+    correction = (
+        "That is not a LinkedIn public identifier. Pass the part after "
+        '/in/ in a profile URL, for example "williamhgates".'
+    )
+    with pytest.raises(ToolError) as raised:
+        raise_tool_error(InvalidReferenceError(correction))
+    assert str(raised.value) == correction
+
+
+def test_invalid_reference_skips_issue_diagnostics(monkeypatch):
+    # A reference the caller can correct is not a bug worth filing, and an issue
+    # template appended to it buries the correction the message already carries.
+    #
+    # Asserted on the surfaced message, not by raising from the patched builder:
+    # _raise_tool_error_with_diagnostics catches every Exception around that call
+    # and falls back to no diagnostics, so a raising double reports success
+    # whether the branch exists or not.
+    marker = "ISSUE-TEMPLATE-MARKER"
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_handler.build_issue_diagnostics",
+        lambda *args, **kwargs: marker,
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_handler.format_tool_error_with_diagnostics",
+        lambda message, diagnostics: f"{message}\n{diagnostics}",
+    )
+
+    with pytest.raises(ToolError) as raised:
+        raise_tool_error(InvalidReferenceError("Pass the /company/ slug."))
+    assert marker not in str(raised.value)
+    assert "Pass the /company/ slug." in str(raised.value)
 
 
 def test_unknown_exception_log_is_redacted(monkeypatch, caplog):
@@ -344,7 +409,7 @@ class TestAnAlreadyShapedToolErrorPassesThrough:
         while current is not None:
             chain.append(type(current))
             current = current.__cause__
-        assert chain == [ToolError, SessionExpiredError]
+        assert chain == [CodedToolError, SessionExpiredError]
 
     def test_the_second_pass_is_not_logged_as_an_unexpected_error(self, caplog):
         # The catch-all logs at ERROR as "Unexpected error". A failure a branch
@@ -401,7 +466,7 @@ class TestAnAlreadyShapedToolErrorPassesThrough:
 
         asyncio.run(drive())
 
-        assert seen["chain"] == [ToolError, SessionExpiredError]
+        assert seen["chain"] == [CodedToolError, SessionExpiredError]
 
     def test_a_shaped_error_carrying_a_credential_is_still_redacted(self, monkeypatch):
         # The pass-through must not become a way around redaction. Before this

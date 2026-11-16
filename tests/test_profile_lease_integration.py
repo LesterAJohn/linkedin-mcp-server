@@ -101,8 +101,6 @@ class TestBusyIsNotAnAuthFailure:
     async def test_middleware_reports_busy_without_triggering_relogin(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # argparse otherwise reads pytest's own command line.
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         monkeypatch.setenv("BROWSER_WAIT", "0.5")
 
         holder = _hold_profile(tmp_path, 30)
@@ -285,7 +283,6 @@ class TestIdleOwnerHandsOver:
 
         from linkedin_mcp_server.drivers import browser as browser_module
 
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         monkeypatch.setattr(browser_module, "_HANDOFF_POLL_INTERVAL_SECONDS", 0.05)
 
         lease = get_profile_lease(tmp_path / "profile")
@@ -345,8 +342,6 @@ class TestPollerDoesNotInterruptWork:
     ) -> None:
         from linkedin_mcp_server.drivers import browser as browser_module
 
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
-
         lease = get_profile_lease(tmp_path / "profile")
         assert lease.try_acquire()
         lease.mark_browser_open()
@@ -403,7 +398,6 @@ class TestPollerDoesNotInterruptWork:
         from linkedin_mcp_server.config import reset_config
         from linkedin_mcp_server.drivers import browser as browser_module
 
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         monkeypatch.setenv("BROWSER_MIN_HOLD", "0")
         reset_config()
 
@@ -490,7 +484,6 @@ class TestPollerDoesNotInterruptWork:
         from linkedin_mcp_server.config import reset_config
         from linkedin_mcp_server.drivers import browser as browser_module
 
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         monkeypatch.setenv("BROWSER_MIN_HOLD", "0")
         reset_config()
 
@@ -591,7 +584,6 @@ class TestMinimumHoldWindow:
     ) -> None:
         from linkedin_mcp_server.drivers import browser as browser_module
 
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         monkeypatch.setenv("BROWSER_MIN_HOLD", "300")
 
         lease = get_profile_lease(tmp_path / "profile")
@@ -662,7 +654,6 @@ class TestTheHandoffAsksTheLeaseTheBrowserHolds:
         from linkedin_mcp_server.config import reset_config
         from linkedin_mcp_server.drivers import browser as browser_module
 
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         monkeypatch.setenv("BROWSER_MIN_HOLD", "0")
         reset_config()
 
@@ -700,7 +691,6 @@ class TestTheHandoffAsksTheLeaseTheBrowserHolds:
         from linkedin_mcp_server.config import reset_config
         from linkedin_mcp_server.drivers import browser as browser_module
 
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         monkeypatch.setenv("BROWSER_MIN_HOLD", "60")
         reset_config()
 
@@ -749,7 +739,6 @@ class TestFailedLoginStillRestores:
     ) -> None:
         from linkedin_mcp_server import setup as setup_module
 
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         profile = tmp_path / "profile"
         profile.mkdir(parents=True)
         (profile / "Default").mkdir()
@@ -796,6 +785,57 @@ class TestConfirmedClose:
                 await browser_module.close_browser()
 
         assert lease.held, "the lease was released on an unconfirmed close"
+        lease.release()
+
+    async def test_a_cancelled_close_keeps_the_lease_on_the_retry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The real manager, because the hole was in its answer, not the caller's.
+
+        A cancel mid-teardown leaves the handles taken and Chromium possibly
+        running. The retry that follows used to find nothing left to close and
+        report success from that alone, which released the profile to the next
+        process.
+        """
+        import asyncio
+
+        from linkedin_mcp_server.core.browser import BrowserManager
+        from linkedin_mcp_server.drivers import browser as browser_module
+
+        lease = get_profile_lease(tmp_path / "profile")
+        assert lease.try_acquire()
+
+        entered = asyncio.Event()
+
+        async def never_returns() -> None:
+            entered.set()
+            await asyncio.sleep(3600)
+
+        manager = BrowserManager(user_data_dir=tmp_path / "profile")
+        manager._context = MagicMock(close=AsyncMock(side_effect=never_returns))
+        manager._playwright = MagicMock(stop=AsyncMock())
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.drain_browser_process_marker",
+            # Chromium is still there to be found
+            lambda _marker, **_containment: False,
+        )
+
+        cancelled = asyncio.ensure_future(manager.close())
+        await entered.wait()
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+
+        with patch.multiple(
+            browser_module,
+            _browser=manager,
+            _browser_cookie_export_path=None,
+            _browser_lease=lease,
+        ):
+            with patch.object(browser_module, "get_profile_lease", return_value=lease):
+                await browser_module.close_browser()
+
+        assert lease.held, "the retry released the profile it could not prove free"
         lease.release()
 
     async def test_confirmed_close_releases_the_lease(self, tmp_path: Path) -> None:
@@ -922,9 +962,8 @@ class TestALateLoginDoesNotUndoAnEarlierOne:
         from linkedin_mcp_server.config import set_config
         from linkedin_mcp_server.config.schema import AppConfig
 
-        # Installed rather than loaded: `_login_holding_the_profile` calls
-        # get_config(), which parses sys.argv, and under pytest that is pytest's
-        # own command line.
+        # Installed because `_login_holding_the_profile` reads the process-global
+        # config and this test needs a known value there.
         set_config(AppConfig())
 
         opened: list[bool] = []
@@ -1195,6 +1234,100 @@ class TestALateImportDoesNotUndoALogin:
         )
 
         assert committed == [True]
+
+
+class TestEveryLaunchPathStartsAGuardian:
+    """A crash frees the lease; the guardian is what keeps holding the profile.
+
+    ``drivers.browser`` starts one for the shared launch. The CLI login and the
+    session import each build a ``BrowserManager`` of their own and never reach
+    that code, so each has to start its own. Asserted on the descriptor rather
+    than on the call alone, because a guardian handed anything else holds
+    nothing, and on the release because there is one guardian per process: kept
+    past a proved teardown it would hold an unlocked descriptor while every
+    later launch reused it.
+    """
+
+    async def test_the_login_starts_one_holding_its_own_lease(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        import linkedin_mcp_server.setup as setup_module
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        # The launch options this test stubs past still read process-global
+        # config, so install known defaults rather than inherit another test's.
+        set_config(AppConfig())
+
+        lease = get_profile_lease(isolate_profile_dir)
+        assert lease.try_acquire()
+        try:
+            events: list[str] = []
+            monkeypatch.setattr(
+                setup_module,
+                "start_browser_guardian",
+                lambda fd: events.append(f"start {fd}"),
+            )
+            monkeypatch.setattr(
+                setup_module,
+                "release_browser_guardian",
+                lambda: events.append("release"),
+            )
+            monkeypatch.setattr(
+                setup_module, "rotate_shielded", AsyncMock(return_value=None)
+            )
+            state = setup_module._LoginState()
+
+            async def signed_in(*_args, **_kwargs) -> bool:
+                # What the real teardown reports, and the flag the release is
+                # guarded by: a login whose browser is not provably gone must
+                # keep its guardian.
+                state.close_confirmed = True
+                return True
+
+            monkeypatch.setattr(setup_module, "_login_into_fresh_profile", signed_in)
+
+            assert await setup_module._login_holding_the_profile(
+                isolate_profile_dir, lease, state
+            )
+
+            assert events == [f"start {lease.guardian_fd()}", "release"]
+        finally:
+            lease.release()
+
+    async def test_the_import_starts_one_holding_its_own_lease(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        import linkedin_mcp_server.browser_import.orchestrate as orchestrate
+
+        lease = get_profile_lease(isolate_profile_dir)
+        assert lease.try_acquire()
+        try:
+            events: list[str] = []
+            monkeypatch.setattr(
+                orchestrate,
+                "start_browser_guardian",
+                lambda fd: events.append(f"start {fd}"),
+            )
+            monkeypatch.setattr(
+                orchestrate,
+                "release_browser_guardian",
+                lambda: events.append("release"),
+            )
+            monkeypatch.setattr(
+                orchestrate, "rotate_shielded", AsyncMock(return_value=None)
+            )
+            monkeypatch.setattr(
+                orchestrate, "_import_first_accepted", AsyncMock(return_value=True)
+            )
+
+            assert await orchestrate._import_holding_the_profile(
+                [], isolate_profile_dir / "cookies.json", isolate_profile_dir, lease
+            )
+
+            assert events == [f"start {lease.guardian_fd()}", "release"]
+        finally:
+            lease.release()
 
 
 class TestAMomentaryHolderDoesNotCancelTheRepair:

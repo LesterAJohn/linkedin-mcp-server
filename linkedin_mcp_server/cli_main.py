@@ -7,6 +7,9 @@ import signal
 import sys
 import threading
 import time
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NoReturn
 
@@ -16,14 +19,20 @@ from linkedin_mcp_server.bootstrap import (
     configure_browser_environment,
     ensure_browser_installed,
 )
-from linkedin_mcp_server.core import AuthenticationError
+from linkedin_mcp_server.core import AccountRestrictedError, AuthenticationError
 from linkedin_mcp_server.exceptions import (
+    BrowserBusyError,
     BrowserDowngradeError,
     ProfileRootRefusedError,
 )
 from linkedin_mcp_server.authentication import clear_auth_state
-from linkedin_mcp_server.config import get_config
-from linkedin_mcp_server.config.schema import AppConfig, ConfigurationError
+from linkedin_mcp_server.config import get_config, set_config
+from linkedin_mcp_server.config.loaders import load_config
+from linkedin_mcp_server.config.schema import (
+    PROFILE_HANDOVER_WAIT_SECONDS,
+    AppConfig,
+    ConfigurationError,
+)
 from linkedin_mcp_server.drivers.browser import (
     experimental_persist_derived_runtime,
     close_browser,
@@ -34,9 +43,15 @@ from linkedin_mcp_server.drivers.browser import (
 )
 from linkedin_mcp_server.debug_trace import should_keep_traces
 from linkedin_mcp_server.logging_config import configure_logging, teardown_trace_logging
+from linkedin_mcp_server.login_viewer import (
+    LoginViewerError,
+    require_persistent_profile_mount,
+)
 from linkedin_mcp_server.profile_claim import ensure_profile_claim
+from linkedin_mcp_server import session_state
 from linkedin_mcp_server.session_state import (
     get_runtime_id,
+    is_container_runtime,
     load_runtime_state,
     load_source_state,
     portable_cookie_path,
@@ -44,12 +59,14 @@ from linkedin_mcp_server.session_state import (
     runtime_storage_state_path,
     source_state_path,
 )
+from linkedin_mcp_server import remote_tools
 from linkedin_mcp_server.server import ServerRole, create_mcp_server
-from linkedin_mcp_server.server_role import stand_down_reason
+from linkedin_mcp_server.server_role import process_role, stand_down_reason
 from linkedin_mcp_server.setup import run_profile_creation
 
 if TYPE_CHECKING:
-    from linkedin_mcp_server.daemon_proxy import DaemonProxyBackend
+    from linkedin_mcp_server.daemon.discovery import Attachment, Unanswered
+    from linkedin_mcp_server.daemon.proxy import DaemonProxyBackend
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +111,281 @@ def choose_transport_interactive() -> Literal["stdio", "streamable-http"]:
     return answers["transport"]
 
 
+_RETIRE_PROMPT = (
+    "A shared browser may be running in the background for this profile. "
+    "Ask it to retire and continue? (y/N): "
+)
+_RETIRE_NEEDS_A_TERMINAL = (
+    "ℹ️  A shared browser is recorded for this profile, and retiring it needs an "
+    "interactive terminal to confirm. Continuing with the usual profile checks."
+)
+_RETIRE_UNREADABLE = (
+    "ℹ️  A shared browser is recorded for this profile, but its record could not "
+    "be read, so it cannot be asked to retire."
+)
+_RETIRE_OTHER_PROTOCOL = (
+    "ℹ️  The shared browser recorded for this profile speaks another protocol, "
+    "so this build cannot ask it to retire. If it is still running, wait for it "
+    "to exit."
+)
+_RETIRE_NO_CONNECTION = (
+    "ℹ️  No connection could be established to the recorded shared-browser "
+    "endpoint. Continuing with the usual profile checks."
+)
+_RETIRE_BUSY = (
+    "❌ A background shared browser for this profile is busy with another "
+    "client's call. Wait for it to finish and retry. To keep future sessions "
+    "from sharing a browser, start them with --no-daemon; that does not stop "
+    "the one running now."
+)
+_RETIRE_REJECTED = (
+    "❌ The shared browser did not accept this client's credentials; it may "
+    "have been replaced. Retry."
+)
+# Scoped to this command's own operation. Never "nothing was changed": an owner
+# that accepted and then answered badly may already be closing its browser,
+# which exports the session as it goes.
+_RETIRE_UNEXPECTED = (
+    "❌ The shared browser answered in a way this build does not recognise. "
+    "This command has not performed the requested profile operation, but the "
+    "shared browser may have begun retiring. Retry in a moment."
+)
+_RETIRE_NO_ANSWER = (
+    "❌ Asked the shared browser to retire but got no answer. It may be "
+    "retiring now. This command has not performed the requested profile "
+    "operation. Retry in a moment."
+)
+_RETIRE_INTERRUPTED = (
+    "❌ Cancelled. The shared browser was asked to retire and may be retiring now."
+)
+
+_STATUS_PROFILE_HELD = (
+    "❌ Another process holds the browser profile, so the session could not be "
+    "checked. Your saved session was not changed. Run --status again once that "
+    "process is done."
+)
+_STATUS_HELD_BY_SHARED_BROWSER = (
+    "   A shared browser serving other MCP clients is recorded for this profile."
+)
+
+#: How long the owner has to answer. It decides without waiting on anything, so
+#: this bounds a hung process, not a slow decision.
+_RETIRE_REPLY_SECONDS = 5.0
+
+
+@dataclass
+class _Retirement:
+    """Whether this command has asked a shared browser to retire.
+
+    Set once the user has confirmed and before the request is built, so from
+    then on nothing may describe the request as unsent, whatever is interrupted:
+    the send, the reply, reading it, or the command's own wait and operation.
+    """
+
+    requested: bool = False
+
+
+@contextmanager
+def _reporting_a_confirmed_retirement() -> Generator[_Retirement]:
+    """Say that retirement may have begun if the command is interrupted after asking.
+
+    Wraps the whole of a profile command from the retirement lookup onwards, so
+    there is no gap between the request and the command's own work for an
+    interrupt to fall through. An interrupt before the request, including at
+    the prompt, is not this one's to report: nothing was sent.
+    """
+    retirement = _Retirement()
+    try:
+        yield retirement
+    except KeyboardInterrupt:
+        if not retirement.requested:
+            raise
+        print(f"\n{_RETIRE_INTERRUPTED}")
+        sys.exit(130)
+
+
+def _retire_a_shared_browser(config: AppConfig, retirement: _Retirement) -> bool:
+    """Ask an idle shared browser to retire, if there is one and the user agrees.
+
+    For ``--logout``, ``--login`` and ``--import-from-browser``, which change a
+    profile a shared browser may be holding. True means the owner agreed and is
+    retiring, so the caller waits a bounded time for the profile instead of
+    demanding it. False means there was nothing to ask, and the command goes on
+    exactly as it would without a daemon: the profile lease is what keeps it off
+    a browser that is still running. Every refusal exits here.
+
+    Call it inside ``_reporting_a_confirmed_retirement``, with the command's
+    own work, and pass that scope's *retirement*.
+
+    Nothing is contacted before the user answers. The lookup reads files only,
+    and a process that would never use a shared browser does not even do that.
+    """
+    from linkedin_mcp_server.daemon.discovery import daemon_would_be_used
+
+    if not daemon_would_be_used(config):
+        return False
+    attachment = _owner_to_retire(config)
+    if attachment is None:
+        return False
+
+    if not config.is_interactive:
+        # Nothing to confirm with, so nothing is asked. Not a refusal: the record
+        # may be all an exited owner left, and the profile lease still keeps this
+        # command off a browser that is running, exactly as for a Direct server.
+        print(_RETIRE_NEEDS_A_TERMINAL)
+        return False
+    try:
+        answer = input(_RETIRE_PROMPT).strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        print("\n❌ Operation cancelled")
+        sys.exit(0)
+    if answer not in ("y", "yes"):
+        print("❌ Operation cancelled")
+        sys.exit(0)
+
+    retirement.requested = True
+    return _ask_to_retire(attachment)
+
+
+def _owner_to_retire(config: AppConfig) -> "Attachment | None":
+    """The recorded owner of this profile that may be asked to retire, if any.
+
+    A reading of files and nothing more, so it says what is recorded rather than
+    what is running: an owner that exited leaves its record behind.
+    """
+    from linkedin_mcp_server.daemon.discovery import (
+        Mismatch,
+        OwnerState,
+        look_up_owner,
+    )
+    from linkedin_mcp_server.session_state import auth_root_dir
+
+    profile = get_profile_dir()
+    try:
+        lookup = look_up_owner(
+            auth_root_dir(profile), profile, config, for_retirement=True
+        )
+    except Exception:
+        logger.debug("The shared browser record could not be read", exc_info=True)
+        print(_RETIRE_UNREADABLE)
+        return None
+    if lookup.state is OwnerState.UNTRUSTED:
+        logger.debug("Shared browser record detail: %s", lookup.reason)
+        print(_RETIRE_UNREADABLE)
+        return None
+    if lookup.mismatch is Mismatch.PROTOCOL:
+        print(_RETIRE_OTHER_PROTOCOL)
+        return None
+    attachment = lookup.attachment
+    if (
+        lookup.state is not OwnerState.ATTACHABLE
+        or attachment is None
+        or attachment.control_only
+    ):
+        # Nothing recorded, or an owner of another runtime or profile: not the
+        # browser this command is about to change.
+        return None
+    return attachment
+
+
+def _shared_browser_recorded(config: AppConfig) -> bool:
+    """Whether a trusted shared browser of this runtime is recorded for the profile.
+
+    For ``--status`` to name what may hold the profile. The same local lookup
+    as ``_owner_to_retire``, which prepares the daemon state directories but
+    contacts no owner, made only by a process that would itself use a shared
+    browser, and silent: an unreadable record means nothing is named, never
+    that the status check failed.
+    """
+    from linkedin_mcp_server.daemon.discovery import (
+        OwnerState,
+        daemon_would_be_used,
+        look_up_owner,
+    )
+    from linkedin_mcp_server.session_state import auth_root_dir
+
+    if not daemon_would_be_used(config):
+        return False
+    profile = get_profile_dir()
+    try:
+        lookup = look_up_owner(
+            auth_root_dir(profile), profile, config, for_retirement=True
+        )
+    except Exception:
+        logger.debug("The shared browser record could not be read", exc_info=True)
+        return False
+    return (
+        lookup.state is OwnerState.ATTACHABLE
+        and lookup.attachment is not None
+        and not lookup.attachment.control_only
+    )
+
+
+def _ask_to_retire(attachment: "Attachment") -> bool:
+    """Send the idle-only retirement and act on the answer.
+
+    Idle-only, and never anything else: a failure here is reported, not retried
+    as a turnover, which would cut off another client's call.
+    An interrupt is left to the caller's ``_reporting_a_confirmed_retirement``,
+    which covers reading the reply as well as sending the request.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    import httpx2
+
+    from linkedin_mcp_server.daemon import owner as daemon_owner
+
+    instance = attachment.descriptor.instance_id
+    parts = urlsplit(attachment.descriptor.url)
+    url = urlunsplit((parts.scheme, parts.netloc, daemon_owner.STAND_DOWN_PATH, "", ""))
+    try:
+        with daemon_owner.direct_http_client(timeout=_RETIRE_REPLY_SECONDS) as client:
+            response = client.post(
+                url,
+                headers={"Authorization": f"Bearer {attachment.token}"},
+                json=daemon_owner.stand_down_request(
+                    instance, mode=daemon_owner.STAND_DOWN_IDLE_ONLY
+                ),
+            )
+    except (httpx2.ConnectError, httpx2.ConnectTimeout):
+        # No connection was made, so this request was not delivered. That is
+        # all it proves: not that the owner is gone, only that it was not asked.
+        # Refusing here would refuse every run after an owner exits, since it
+        # leaves its record behind, so the command goes on as it would without
+        # a daemon and the lease decides whether the profile is free.
+        logger.debug("The shared browser could not be reached", exc_info=True)
+        print(_RETIRE_NO_CONNECTION)
+        return False
+    except Exception:
+        logger.debug("The retirement request got no answer", exc_info=True)
+        print(_RETIRE_NO_ANSWER)
+        sys.exit(1)
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        payload = {}
+    if (
+        response.status_code == 200
+        and payload.get("standing_down") is True
+        and payload.get("retiring") is True
+        and payload.get("instance") == instance
+    ):
+        print("ℹ️  The shared browser is retiring; waiting for it to let go.")
+        return True
+    if response.status_code == 409 and payload.get("busy") is True:
+        print(_RETIRE_BUSY)
+        sys.exit(1)
+    if response.status_code == 401:
+        print(_RETIRE_REJECTED)
+        sys.exit(1)
+    logger.debug("Unexpected retirement answer: %s", response.status_code)
+    print(_RETIRE_UNEXPECTED)
+    sys.exit(1)
+
+
 def clear_profile_and_exit() -> None:
     """Clear LinkedIn browser profile and exit."""
     config = get_config()
@@ -117,6 +409,17 @@ def clear_profile_and_exit() -> None:
         print("Nothing to clear.")
         sys.exit(0)
 
+    # Before asking: what the user agrees to delete is the session there now,
+    # and the deletion checks it is still that one once the profile is held.
+    try:
+        confirmed = session_state.auth_state_identity(get_profile_dir())
+    except OSError as e:
+        print(
+            "❌ The stored LinkedIn session could not be read to tell what would "
+            f"be cleared ({type(e).__name__}). Nothing was deleted."
+        )
+        sys.exit(1)
+
     print(f"🔑 Clear LinkedIn authentication state from {auth_root}?")
 
     try:
@@ -130,7 +433,31 @@ def clear_profile_and_exit() -> None:
         print("\n❌ Operation cancelled")
         sys.exit(0)
 
-    if clear_auth_state(get_profile_dir()):
+    # After the deletion prompt, which it does not replace: agreeing to retire a
+    # browser is not agreeing to delete a session.
+    with _reporting_a_confirmed_retirement() as retirement:
+        if _retire_a_shared_browser(config, retirement):
+            try:
+                cleared = session_state.clear_auth_state(
+                    get_profile_dir(),
+                    wait_seconds=PROFILE_HANDOVER_WAIT_SECONDS,
+                    confirmed=confirmed,
+                )
+            except RuntimeError as e:
+                # The profile did not come free in time: a successor may have
+                # taken it, or the retiring browser is slow to close. Or it did,
+                # and another client had signed in while this one waited.
+                # Nothing was deleted.
+                print(f"❌ {e}")
+                sys.exit(1)
+        else:
+            try:
+                cleared = clear_auth_state(get_profile_dir(), confirmed=confirmed)
+            except session_state.SessionChangedError as e:
+                print(f"❌ {e}")
+                sys.exit(1)
+
+    if cleared:
         print("✅ LinkedIn authentication state cleared successfully!")
     else:
         print("❌ Failed to clear authentication state")
@@ -151,8 +478,14 @@ def get_profile_and_exit() -> None:
     version = get_version()
     logger.info(f"LinkedIn MCP Server v{version} - Session Creation mode")
 
+    # The login already waits for the profile (`setup.interactive_login`), which
+    # is the whole of what a retiring owner needs from it.
     user_data_dir = config.browser.user_data_dir
-    success = run_profile_creation(user_data_dir)
+    with _reporting_a_confirmed_retirement() as retirement:
+        _retire_a_shared_browser(config, retirement)
+        success = run_profile_creation(
+            user_data_dir, login_viewer=config.server.login_viewer
+        )
 
     sys.exit(0 if success else 1)
 
@@ -183,22 +516,43 @@ def import_from_browser_and_exit() -> None:
         NoLinkedInSessionFoundError,
     )
 
-    if config.is_interactive:
-        print(
-            "ℹ️  macOS may prompt to allow keychain access to the browser's "
-            "Safe Storage."
-        )
-    try:
-        ok = asyncio.run(
-            import_session_from_browser(selector, user_data_dir=user_data_dir)
-        )
-    except NoLinkedInSessionFoundError as e:
-        print(f"❌ {e}")
-        print("   Log into LinkedIn in your browser first, or run with --login.")
-        sys.exit(1)
-    except (CookieDecryptionError, AuthenticationError) as e:
-        print(f"❌ Could not import session: {e}")
-        sys.exit(1)
+    with _reporting_a_confirmed_retirement() as retirement:
+        # Only a retiring owner is waited for, at the import's own first claim
+        # on the profile. Without one the import demands the profile as it
+        # always has.
+        retiring = _retire_a_shared_browser(config, retirement)
+        if config.is_interactive:
+            print(
+                "ℹ️  macOS may prompt to allow keychain access to the browser's "
+                "Safe Storage."
+            )
+        try:
+            ok = asyncio.run(
+                import_session_from_browser(
+                    selector,
+                    user_data_dir=user_data_dir,
+                    profile_wait_seconds=(
+                        PROFILE_HANDOVER_WAIT_SECONDS if retiring else 0.0
+                    ),
+                )
+            )
+        except BrowserBusyError as e:
+            if not retiring:
+                raise
+            # The profile did not come free in time. Nothing was imported.
+            print(f"❌ {e}")
+            sys.exit(1)
+        except NoLinkedInSessionFoundError as e:
+            print(f"❌ {e}")
+            print("   Log into LinkedIn in your browser first, or run with --login.")
+            sys.exit(1)
+        except (
+            CookieDecryptionError,
+            AuthenticationError,
+            AccountRestrictedError,
+        ) as e:
+            print(f"❌ Could not import session: {e}")
+            sys.exit(1)
 
     if ok:
         print(f"✅ Imported and validated LinkedIn session into {user_data_dir}")
@@ -279,11 +633,11 @@ def profile_info_and_exit() -> None:
             return browser.is_authenticated
         except AuthenticationError:
             return False
-        except BrowserDowngradeError:
+        except (BrowserDowngradeError, AccountRestrictedError, BrowserBusyError):
             # Not "unexpected", and no traceback. This is the guard doing its
-            # job, the message already says which two versions and what to do,
-            # and `--status` is the first thing a puzzled user runs. The tool
-            # path treats it the same way, in `error_handler`.
+            # job, the message already says what happened and what to do, and
+            # `--status` is the first thing a puzzled user runs. The tool path
+            # treats the first two the same way, in `error_handler`.
             raise
         except Exception as e:
             logger.exception(f"Unexpected error checking session: {e}")
@@ -307,10 +661,18 @@ def profile_info_and_exit() -> None:
 
     try:
         valid = asyncio.run(check_session())
-    except BrowserDowngradeError as e:
+    except (BrowserDowngradeError, AccountRestrictedError) as e:
         # Ahead of the generic handler, which would add "Check logs and browser
         # configuration" to a message that already names the fix exactly.
         print(f"\n❌ {e}")
+        sys.exit(1)
+    except BrowserBusyError:
+        # The tool wording ("call this exact tool again") is for an MCP client,
+        # and nothing here failed: the profile lease kept this check off a
+        # browser that is running.
+        print(_STATUS_PROFILE_HELD)
+        if _shared_browser_recorded(config):
+            print(_STATUS_HELD_BY_SHARED_BROWSER)
         sys.exit(1)
     except Exception as e:
         print(f"❌ Could not validate session: {e}")
@@ -327,13 +689,17 @@ def profile_info_and_exit() -> None:
     sys.exit(1)
 
 
-def _obtain_shared_owner(config: AppConfig) -> "DaemonProxyBackend | None":
+def _obtain_shared_owner(
+    config: AppConfig,
+) -> "DaemonProxyBackend | Unanswered | None":
     """Return the shared owner to forward to, starting one if nobody has.
 
-    Off by default, and inert when off. ``None`` means this process serves its
-    own client the way it always has: the flag is off, the transport is HTTP (one
-    server for many clients already, so there is nothing to deduplicate), or no
-    owner could be established at all.
+    Off by default, and inert when off. Anything but a backend means this
+    process serves its own client the way it always has: the flag is off, the
+    transport is HTTP (one server for many clients already, so there is nothing
+    to deduplicate), or no owner could be established at all. That last case
+    returns the election's :class:`Unanswered` when an owner it found did not
+    answer, so a busy browser can be explained by it later.
 
     Never fatal, and that is a decision rather than an oversight. A client that
     refused to start because a shared browser could not be elected would fail
@@ -351,25 +717,23 @@ def _obtain_shared_owner(config: AppConfig) -> "DaemonProxyBackend | None":
     (``drivers/browser.watch_for_handoff_requests``). The daemon lock decides who
     *owns* the browser; the lease decides who is driving it right now.
 
-    That safety net carries more weight on Windows than elsewhere, which is worth
-    knowing before the flag becomes the default. A frontend there takes no lock
-    at all and starts a child that competes for one
-    (``daemon_election._start_contending_for_the_lock``), so a local spawn
-    failure is indistinguishable from a rival owner that holds the lock and has
-    not published yet: ``obtain_owner`` returns at once and this process falls
-    back while an owner may in fact be coming up. On POSIX the equivalent
-    outcomes are terminal, because the frontend held the lock itself. Windows
-    already carries platform gaps that gate the default flip, and this is one of
-    them.
+    That safety net carries weight on every platform, which is worth knowing
+    before the flag becomes the default. A frontend takes no lock itself: it
+    starts a child that competes for one
+    (``daemon.spawn._start_owner``), and only the child that
+    wins holds it and publishes. A local spawn failure is therefore
+    indistinguishable from a rival owner that holds the lock and has not
+    published yet, so this process can fall back while an owner is in fact
+    coming up.
     """
-    from linkedin_mcp_server.daemon import daemon_would_be_used
+    from linkedin_mcp_server.daemon.discovery import daemon_would_be_used
 
     if not daemon_would_be_used(config):
         return None
 
     try:
-        from linkedin_mcp_server.daemon_election import obtain_owner
-        from linkedin_mcp_server.daemon_proxy import DaemonProxyBackend
+        from linkedin_mcp_server.daemon.election import obtain_owner
+        from linkedin_mcp_server.daemon.proxy import DaemonProxyBackend
         from linkedin_mcp_server.session_state import auth_root_dir
 
         profile = get_profile_dir()
@@ -387,9 +751,8 @@ def _obtain_shared_owner(config: AppConfig) -> "DaemonProxyBackend | None":
         # already matched and reached.
         #
         # The election's own inputs travel with it, because they are what finding
-        # a *replacement* would take and nothing downstream has them: the proxy
-        # layer receives no configuration, and reading the singleton there would
-        # parse whatever `sys.argv` holds.
+        # a *replacement* would take. Reading process-global state downstream
+        # would hide that dependency instead of carrying the verified inputs.
         return DaemonProxyBackend(
             attachment=attachment,
             auth_root=auth_root,
@@ -402,7 +765,7 @@ def _obtain_shared_owner(config: AppConfig) -> "DaemonProxyBackend | None":
         "drive its own browser",
         outcome.attachment_lookup.state.value,
     )
-    return None
+    return outcome.unanswered
 
 
 def get_version() -> str:
@@ -447,10 +810,24 @@ def _exit_on_a_bad_setting(error: ConfigurationError) -> NoReturn:
     sys.exit(1)
 
 
-def main() -> None:
+def _preflight_login_viewer(config: AppConfig) -> None:
+    """Validate the container boundary and persistent mount before mutation."""
+    if not config.server.login_viewer:
+        return
+    if not is_container_runtime():
+        raise ConfigurationError("--login-viewer is available only inside a container")
+    try:
+        require_persistent_profile_mount(Path(config.browser.user_data_dir))
+    except LoginViewerError as exc:
+        raise ConfigurationError(str(exc)) from exc
+
+
+def main(argv: Sequence[str] | None = None) -> None:
     """Main application entry point."""
     try:
-        config = get_config()
+        config = load_config(sys.argv[1:] if argv is None else argv)
+        set_config(config)
+        _preflight_login_viewer(config)
     except ConfigurationError as e:
         # A bad setting used to leave the loader as an exception nothing
         # caught, so Python printed the whole stack down through the loader and
@@ -485,10 +862,8 @@ def main() -> None:
         # nested auth root, and claiming that one would protect the wrong
         # directory while looking like protection.
         #
-        # Read off the config already in hand rather than through
-        # `get_source_profile_dir()`. That helper reaches for the global config,
-        # which lazily parses `sys.argv`, and reaching for it a second time here
-        # would re-parse whatever argv happens to hold.
+        # Read off the validated config already in hand rather than reaching
+        # through `get_source_profile_dir()` to process-global state.
         ensure_profile_claim(
             Path(config.browser.user_data_dir),
             claim_anyway=config.server.claim_profile_root,
@@ -560,17 +935,30 @@ def main() -> None:
             # before this runs: `daemon_would_be_used` asks whether this is a
             # stdio process, and an interactively chosen HTTP server must not
             # elect a daemon.
-            proxy_backend = _obtain_shared_owner(config)
+            shared = _obtain_shared_owner(config)
 
             # Create and run the MCP server
-            if proxy_backend is None:
+            from linkedin_mcp_server.daemon.discovery import Unanswered
+
+            if shared is None:
                 mcp = create_mcp_server(tool_timeout=config.server.tool_timeout_seconds)
+            elif isinstance(shared, Unanswered):
+                mcp = create_mcp_server(
+                    tool_timeout=config.server.tool_timeout_seconds,
+                    silent_owner=shared,
+                )
             else:
                 mcp = create_mcp_server(
                     tool_timeout=config.server.tool_timeout_seconds,
                     role=ServerRole.PROXY,
-                    proxy_backend=proxy_backend,
+                    proxy_backend=shared,
                 )
+
+            # Direct only: a proxy serves the owner's tools, and the owner has
+            # no client of its own. Before `run`, which reads the tool list and
+            # the instructions once per client.
+            if process_role() is ServerRole.DIRECT:
+                remote_tools.install(mcp)
 
             if transport == "streamable-http":
                 # Validate Host and Origin. Without this a website the user
@@ -605,7 +993,7 @@ def main() -> None:
                 #
                 # Deliberately no host wildcard: it would accept any Host and
                 # reopen the same hole from the other side.
-                if proxy_backend is None:
+                if shared is None or isinstance(shared, Unanswered):
                     start_direct_stand_down_monitor()
                 mcp.run(
                     transport=transport,

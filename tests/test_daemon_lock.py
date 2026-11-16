@@ -7,6 +7,8 @@ behaviour that is easy to write correctly and just as easy to break later.
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import os
 import stat
 import subprocess
@@ -14,19 +16,24 @@ import threading
 import sys
 import textwrap
 import time
+from collections.abc import Generator
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest import mock
 
 import pytest
 
-import linkedin_mcp_server.daemon_descriptor as daemon_descriptor_module
-import linkedin_mcp_server.daemon_lock as daemon_lock_module
-from linkedin_mcp_server.daemon_descriptor import daemon_dir, daemon_state_root
-from linkedin_mcp_server.daemon_lock import (
+import linkedin_mcp_server.daemon.descriptor as daemon_descriptor_module
+import linkedin_mcp_server.daemon.lock as daemon_lock_module
+from linkedin_mcp_server.daemon import owner as daemon_owner
+from linkedin_mcp_server.daemon.descriptor import daemon_dir, daemon_state_root
+from linkedin_mcp_server.daemon.lock import (
     DaemonLock,
     DaemonLockError,
-    daemon_is_running,
     daemon_lock_path,
 )
+from linkedin_mcp_server.private_state import PrivateStateError
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -54,12 +61,21 @@ def _run_child(source: str, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _held(auth_root: Path) -> bool:
+    """Whether a contender is refused the lock, as an election would be."""
+    contender = DaemonLock(auth_root)
+    try:
+        return not contender.try_acquire()
+    finally:
+        contender.release()
+
+
 _TRY_ACQUIRE = """
     import os
     import sys
     from pathlib import Path
-    import linkedin_mcp_server.daemon_descriptor as daemon_descriptor
-    from linkedin_mcp_server.daemon_lock import DaemonLock
+    import linkedin_mcp_server.daemon.descriptor as daemon_descriptor
+    from linkedin_mcp_server.daemon.lock import DaemonLock
 
     daemon_descriptor._account_home = lambda: Path(os.environ["HOME"])
     lock = DaemonLock(Path(sys.argv[1]))
@@ -123,6 +139,121 @@ class TestScope:
     @pytest.mark.skipif(
         os.name == "nt", reason="POSIX permission bits do not exist on Windows"
     )
+    def test_fresh_lock_state_is_private_under_umask_zero(self, tmp_path: Path):
+        previous = os.umask(0)
+        lock = DaemonLock(tmp_path / "auth")
+        try:
+            assert lock.try_acquire()
+        finally:
+            os.umask(previous)
+            lock.release()
+
+        assert stat.S_IMODE(daemon_state_root().stat().st_mode) == 0o700
+        assert stat.S_IMODE(lock.path.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(lock.path.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks are required")
+    def test_a_planted_lock_symlink_is_refused(self, tmp_path: Path):
+        path = daemon_lock_path(tmp_path / "auth")
+        path.parent.mkdir(parents=True, mode=0o777)
+        path.parent.chmod(0o777)
+        victim = tmp_path / "victim.lock"
+        victim.write_text("untouched")
+        victim.chmod(0o644)
+        path.symlink_to(victim)
+
+        with pytest.raises(PrivateStateError, match="symbolic link"):
+            DaemonLock(tmp_path / "auth").try_acquire()
+
+        assert stat.S_IMODE(victim.stat().st_mode) == 0o644
+
+    @pytest.mark.skipif(
+        not hasattr(os, "mkfifo"), reason="named pipes are a POSIX mechanism"
+    )
+    def test_a_planted_lock_fifo_is_refused_without_blocking(self, tmp_path: Path):
+        path = daemon_lock_path(tmp_path / "auth")
+        path.parent.mkdir(parents=True, mode=0o777)
+        path.parent.chmod(0o777)
+        os.mkfifo(path)
+        raised: list[BaseException] = []
+
+        def acquire() -> None:
+            try:
+                DaemonLock(tmp_path / "auth").try_acquire()
+            except BaseException as exc:
+                raised.append(exc)
+
+        # Opening a FIFO for reading waits for a writer, and none ever comes, so
+        # a lock that opened it would wait forever. The join only turns that
+        # into a failure: how long the refusal takes on a loaded host is not the
+        # claim, and a wall-clock bound on it failed a correct refusal.
+        worker = threading.Thread(target=acquire, daemon=True)
+        worker.start()
+        worker.join(timeout=30)
+        if worker.is_alive():
+            # A writer releases the blocked open, so the thread ends with the
+            # test. It is offered until the thread is gone: one offered before
+            # the open is reached finds no reader (ENXIO) and releases nothing.
+            deadline = time.monotonic() + 30
+            while worker.is_alive() and time.monotonic() < deadline:
+                with contextlib.suppress(OSError):
+                    os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
+                worker.join(timeout=0.05)
+            pytest.fail("acquiring the lock blocked on the planted FIFO")
+
+        assert len(raised) == 1
+        assert isinstance(raised[0], PrivateStateError)
+        assert "not a regular file" in str(raised[0])
+        assert path.is_fifo()
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="POSIX permission bits do not exist on Windows"
+    )
+    def test_an_existing_regular_lock_is_hardened_before_use(self, tmp_path: Path):
+        path = daemon_lock_path(tmp_path / "auth")
+        path.parent.mkdir(parents=True, mode=0o777)
+        path.parent.chmod(0o777)
+        path.touch(mode=0o666)
+        path.chmod(0o666)
+        lock = DaemonLock(tmp_path / "auth")
+
+        assert lock.try_acquire()
+        try:
+            assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        finally:
+            lock.release()
+
+    def test_failed_fresh_lock_hardening_removes_the_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        def refuse(_path: Path) -> None:
+            raise PrivateStateError("ACL failure")
+
+        monkeypatch.setattr(daemon_lock_module, "harden_created_file", refuse)
+        lock = DaemonLock(tmp_path / "auth")
+
+        with pytest.raises(PrivateStateError, match="ACL failure"):
+            lock.try_acquire()
+
+        assert not lock.path.exists()
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows ACLs are required")
+    def test_lock_file_uses_the_private_file_acl(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        lock = DaemonLock(tmp_path / "auth")
+        assert lock.try_acquire()
+        try:
+            described = describe_dacl(lock.path)
+            assert described.protected is True
+            assert len(described.entries) == 1
+        finally:
+            lock.release()
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="POSIX permission bits do not exist on Windows"
+    )
     def test_acquiring_does_not_harden_the_configured_auth_root(self, tmp_path: Path):
         # Measured before the fix: acquiring changed any existing auth root from
         # 0755 to 0700. A custom profile directly under /tmp would try to chmod
@@ -150,7 +281,6 @@ class TestScope:
 
         assert first.try_acquire()
         try:
-            assert daemon_is_running(auth_root)
             second = DaemonLock(auth_root)
             assert not second.try_acquire()
             second.release()
@@ -195,231 +325,6 @@ class TestScope:
             lock.release()
 
 
-posix_handoff = pytest.mark.skipif(
-    os.name == "nt",
-    reason="Measured on Windows: an inherited handle does not carry the lock",
-)
-
-
-class TestHandoff:
-    @posix_handoff
-    def test_a_duplicate_survives_the_original_being_closed(self, tmp_path: Path):
-        # How an owner is launched: it inherits a copy, and the process that
-        # elected it lets go. If the lock did not survive that, another client
-        # would see it free and elect a second owner against a live browser.
-        lock = DaemonLock(tmp_path)
-        assert lock.try_acquire()
-        inherited = lock.inheritable_copy()
-        lock.release()
-
-        try:
-            assert daemon_is_running(tmp_path)
-        finally:
-            os.close(inherited)
-
-        assert not daemon_is_running(tmp_path)
-
-    @posix_handoff
-    def test_the_copy_is_inheritable(self, tmp_path: Path):
-        # The original is opened close-on-exec so a launched Chromium cannot
-        # hold the lock open. That same flag would stop an owner inheriting
-        # it, so the duplicate has to clear it explicitly.
-        lock = DaemonLock(tmp_path)
-        assert lock.try_acquire()
-        try:
-            inherited = lock.inheritable_copy()
-            try:
-                assert os.get_inheritable(inherited)
-            finally:
-                os.close(inherited)
-        finally:
-            lock.release()
-
-    @posix_handoff
-    def test_handing_over_a_lock_we_do_not_hold_refuses(self, tmp_path: Path):
-        with pytest.raises(DaemonLockError, match="does not hold"):
-            DaemonLock(tmp_path).inheritable_copy()
-
-    @posix_handoff
-    def test_a_descriptor_for_another_auth_root_is_not_adopted(self, tmp_path: Path):
-        # Measured before the check: it was adopted without complaint, so this
-        # process reported it owned a browser nobody had elected it for, while
-        # another process took the real lock unopposed.
-        other = tmp_path / "other"
-        other.mkdir()
-        mine = tmp_path / "mine"
-        mine.mkdir()
-        elsewhere = DaemonLock(other)
-        assert elsewhere.try_acquire()
-        inherited = elsewhere.inheritable_copy()
-        elsewhere.release()
-        # Give this auth root a lock file of its own, so the refusal has to come
-        # from comparing the two rather than from one of them being absent.
-        own = DaemonLock(mine)
-        assert own.try_acquire()
-        own.release()
-
-        try:
-            with pytest.raises(DaemonLockError, match="not this auth root's"):
-                DaemonLock(mine).adopt(inherited)
-        finally:
-            os.close(inherited)
-
-    @posix_handoff
-    def test_a_lock_file_replaced_mid_adoption_is_refused(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        # The descriptor is compared against the path before the lock is held,
-        # so an unlink and recreate in between leaves adoption holding an
-        # orphaned inode while the live path sits free. Measured before the
-        # check: adopter and contender each reported ownership, on two inodes.
-        seed = DaemonLock(tmp_path)
-        assert seed.try_acquire()
-        inherited = seed.inheritable_copy()
-        seed.release()
-        path = daemon_lock_path(tmp_path)
-
-        real = daemon_lock_module.try_lock
-
-        def replace_then_lock(fd: int, *, exclusive: bool) -> bool:
-            monkeypatch.setattr(daemon_lock_module, "try_lock", real)
-            path.unlink()
-            path.touch()
-            return real(fd, exclusive=exclusive)
-
-        monkeypatch.setattr(daemon_lock_module, "try_lock", replace_then_lock)
-
-        try:
-            with pytest.raises(DaemonLockError, match="was replaced"):
-                DaemonLock(tmp_path).adopt(inherited)
-        finally:
-            os.close(inherited)
-
-    @posix_handoff
-    def test_a_lock_file_renamed_mid_adoption_is_refused(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        # A rename keeps the inode's one link, so a link count still reads as
-        # one while the name now refers to something else. Measured with a
-        # count-based check: the rename passed and a contender locked the live
-        # path alongside the adopter.
-        seed = DaemonLock(tmp_path)
-        assert seed.try_acquire()
-        inherited = seed.inheritable_copy()
-        seed.release()
-        path = daemon_lock_path(tmp_path)
-        real = daemon_lock_module.try_lock
-
-        def rename_then_lock(fd: int, *, exclusive: bool) -> bool:
-            monkeypatch.setattr(daemon_lock_module, "try_lock", real)
-            path.rename(path.parent / "moved")
-            path.touch()
-            return real(fd, exclusive=exclusive)
-
-        monkeypatch.setattr(daemon_lock_module, "try_lock", rename_then_lock)
-
-        try:
-            with pytest.raises(DaemonLockError, match="was replaced"):
-                DaemonLock(tmp_path).adopt(inherited)
-        finally:
-            os.close(inherited)
-
-    @posix_handoff
-    def test_a_failed_handover_does_not_leak_the_lock(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        # The duplicate already shares the kernel lock, so leaking it holds the
-        # lock for this process's whole life: release() closes the original and
-        # the lock survives in the copy. Measured before the fix: the daemon
-        # still read as running after release and nobody could take over.
-        lock = DaemonLock(tmp_path)
-        assert lock.try_acquire()
-
-        def refuse(*args: object, **kwargs: object) -> None:
-            raise OSError("cannot mark inheritable")
-
-        monkeypatch.setattr(os, "set_inheritable", refuse)
-        with pytest.raises(OSError):
-            lock.inheritable_copy()
-        monkeypatch.undo()
-
-        lock.release()
-
-        successor = DaemonLock(tmp_path)
-        assert successor.try_acquire(), "the duplicate leaked and kept the lock"
-        successor.release()
-
-    @posix_handoff
-    def test_an_adoption_that_cannot_complete_gives_the_lock_back(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        # By the time inheritance is cleared the lock is held through this
-        # descriptor, and nothing has recorded that yet. Measured before the
-        # cleanup: the failure left it held with no object able to release it,
-        # and only a manual close freed it.
-        elector = DaemonLock(tmp_path)
-        assert elector.try_acquire()
-        inherited = elector.inheritable_copy()
-        elector.release()
-
-        def refuse(*args: object, **kwargs: object) -> None:
-            raise OSError("cannot clear inheritance")
-
-        monkeypatch.setattr(os, "set_inheritable", refuse)
-        with pytest.raises(DaemonLockError, match="could not be taken over"):
-            DaemonLock(tmp_path).adopt(inherited)
-        monkeypatch.undo()
-
-        successor = DaemonLock(tmp_path)
-        assert successor.try_acquire(), "the lock was left held by nobody"
-        successor.release()
-
-    @posix_handoff
-    def test_adopting_a_descriptor_that_holds_no_lock_still_excludes(
-        self, tmp_path: Path
-    ):
-        # An owner launched with a descriptor that was never locked, or
-        # whose lock was already released. Measured before the fix: it reported
-        # ownership while daemon_is_running said no daemon was there and a
-        # contender took the lock alongside it. Adoption now asks for the lock,
-        # which is granted against our own open file description when we already
-        # hold it and takes it when it is free. Either way exactly one holder.
-        creator = DaemonLock(tmp_path)
-        assert creator.try_acquire()
-        creator.release()
-        unlocked = os.open(daemon_lock_path(tmp_path), os.O_RDWR)
-
-        adopter = DaemonLock(tmp_path)
-        adopter.adopt(unlocked)
-        try:
-            assert adopter.held
-            assert daemon_is_running(tmp_path)
-            contender = DaemonLock(tmp_path)
-            assert not contender.try_acquire()
-        finally:
-            adopter.release()
-
-    @posix_handoff
-    def test_an_adopted_lock_is_held_without_reacquiring(self, tmp_path: Path):
-        # An owner is launched already holding a copy. Acquiring again would
-        # fail on POSIX, where the process already holds it, so adoption records
-        # ownership rather than taking it.
-        original = DaemonLock(tmp_path)
-        assert original.try_acquire()
-        inherited = original.inheritable_copy()
-        original.release()
-
-        owner = DaemonLock(tmp_path)
-        owner.adopt(inherited)
-        try:
-            assert owner.held
-            assert daemon_is_running(tmp_path)
-        finally:
-            owner.release()
-
-        assert not daemon_is_running(tmp_path)
-
-
 class TestRegistry:
     def test_a_held_lock_survives_losing_its_last_reference(self, tmp_path: Path):
         # Measured before the fix: the registry was weak throughout, so a lock
@@ -428,12 +333,12 @@ class TestRegistry:
         # remained through which to release it or clean it up after a fork.
         import gc
 
-        from linkedin_mcp_server.daemon_lock import _held_locks
+        from linkedin_mcp_server.daemon.lock import _held_locks
 
         DaemonLock(tmp_path).try_acquire()
         gc.collect()
 
-        assert daemon_is_running(tmp_path)
+        assert _held(tmp_path)
         held = [
             lock for lock in _held_locks if lock.path.parent == daemon_dir(tmp_path)
         ]
@@ -441,38 +346,19 @@ class TestRegistry:
 
         for lock in held:
             lock.release()
-        assert not daemon_is_running(tmp_path)
+        assert not _held(tmp_path)
 
     def test_an_unheld_lock_is_not_kept_alive(self, tmp_path: Path):
         # Only held locks are worth pinning. One that was built and never used
         # owns nothing, so keeping it would be a leak for no benefit.
         import gc
 
-        from linkedin_mcp_server.daemon_lock import _held_locks
+        from linkedin_mcp_server.daemon.lock import _held_locks
 
         DaemonLock(tmp_path)
         gc.collect()
 
         assert not [lock for lock in _held_locks if lock.path.parent == tmp_path]
-
-
-class TestPlatformDifference:
-    @pytest.mark.skipif(
-        os.name != "nt", reason="the refusal only applies where handoff cannot work"
-    )
-    def test_windows_refuses_to_hand_a_lock_over(self, tmp_path: Path):
-        # Measured on a Windows runner: a child holding the inherited handle did
-        # not hold the lock once the parent had closed its handles and exited,
-        # in 20 of 20 runs, while a third process took the byte range.
-        # Returning a descriptor that looks like a transferred lock and is not
-        # would put a second owner on a live browser, so it refuses instead.
-        lock = DaemonLock(tmp_path)
-        assert lock.try_acquire()
-        try:
-            with pytest.raises(DaemonLockError, match="POSIX mechanism"):
-                lock.inheritable_copy()
-        finally:
-            lock.release()
 
 
 class TestFork:
@@ -506,209 +392,166 @@ class TestFork:
             os.read(read_fd, 1)
             lock.release()
 
-            assert not daemon_is_running(tmp_path)
+            assert not _held(tmp_path)
         finally:
             os.close(read_fd)
             os.waitpid(pid, 0)
 
 
-#: The whole adoption, in one clean interpreter: take the lock, hand a copy on,
-#: adopt it, launch an unrelated child that inherits descriptors, let go, and ask
-#: whether anyone can take the lock now.
-#:
-#: All of it in a child rather than in the test, and that is the point. `flock`
-#: is held against the inode, so *any* holder anywhere answers this question, not
-#: only the descriptor under test. Asked from a pytest worker that has run
-#: thousands of other tests, the answer is about that worker as much as about the
-#: adoption. A fresh interpreter holds only what this scenario gave it, which
-#: takes the worker out of the result — whether or not the worker is what made
-#: the earlier version of this test fail intermittently on Linux. That was never
-#: reproduced and is not claimed here.
-_ADOPT_THEN_LAUNCH_AN_UNRELATED_CHILD = """
-    import os
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    import linkedin_mcp_server.daemon_descriptor as daemon_descriptor
-    from linkedin_mcp_server.daemon_lock import DaemonLock
-
-    daemon_descriptor._account_home = lambda: Path(os.environ["HOME"])
-    auth_root = Path(sys.argv[1])
-
-    original = DaemonLock(auth_root)
-    assert original.try_acquire(), "nothing else should hold this lock"
-    inherited = original.inheritable_copy()
-    original.release()
-
-    adopter = DaemonLock(auth_root)
-    adopter.adopt(inherited)
-
-    # Launched the way a browser is, inheriting whatever is still inheritable.
-    child = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            "import sys; print('up', flush=True); sys.stdin.readline()",
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        close_fds=False,
-    )
-    try:
-        # Wait for the child to reach its own code before asking anything about
-        # the lock. Between fork and exec it is a copy of this process and holds
-        # a copy of every descriptor, inheritable or not -- CLOEXEC only takes
-        # effect at exec. Asking inside that window reports the lock as held no
-        # matter what adopt() did, which is a race in the test rather than a
-        # finding about the code.
-        assert child.stdout.readline().strip() == b"up", "the child never started"
-
-        adopter.release()
-        # Through the production API rather than a raw flock, so a `try_acquire`
-        # that refused for its own reasons would be caught here too.
-        successor = DaemonLock(auth_root)
-        print("FREE" if successor.try_acquire() else "HELD")
-    finally:
-        child.kill()
-        child.wait()
-"""
-
-
-class TestAdoptedDescriptors:
-    """That an adopted descriptor is inheritable for exactly one launch.
-
-    Measured before the fix: it stayed inheritable, so an unrelated child
-    launched afterwards, a Chromium among them, inherited the lock and kept it
-    held after the owner exited, leaving every client looking at a daemon that
-    was no longer there.
-    """
-
-    @posix_handoff
-    def test_adopting_takes_the_inheritable_flag_back(self, tmp_path: Path):
-        # The invariant itself, read off the descriptor rather than inferred from
-        # what a child does with it. Nothing is spawned and no lock is contended,
-        # so there is nothing here for another process to disturb.
-        original = DaemonLock(tmp_path)
-        assert original.try_acquire()
-        inherited = original.inheritable_copy()
-        original.release()
-        assert os.get_inheritable(inherited), "the copy is for exactly one launch"
-
-        adopter = DaemonLock(tmp_path)
-        adopter.adopt(inherited)
-        try:
-            assert not os.get_inheritable(inherited), (
-                "an adopted descriptor stays inheritable and leaks into any later child"
-            )
-        finally:
-            adopter.release()
-
-    @posix_handoff
-    def test_a_later_child_does_not_keep_the_lock_alive(self, tmp_path: Path):
-        # The consequence, end to end and away from this process entirely.
-        result = _run_child(_ADOPT_THEN_LAUNCH_AN_UNRELATED_CHILD, str(tmp_path))
-
-        assert result.stdout.strip() == "FREE", (
-            f"the child kept the lock alive\n{result.stderr}"
-        )
-
-
 class TestReleaseSemantics:
-    @posix_handoff
-    def test_releasing_closes_rather_than_unlocks(self, tmp_path: Path):
+    @pytest.mark.skipif(
+        os.name == "nt", reason="flock belongs to the open file description"
+    )
+    @pytest.mark.parametrize("release", ["release", "release_for_exit"])
+    def test_releasing_closes_rather_than_unlocks(self, tmp_path: Path, release: str):
         # The measured trap. flock belongs to the open file description, which
-        # every inherited copy shares, so unlocking would release the lock for
-        # the owner too. Closing drops only this descriptor.
+        # a fork child's copy shares, so unlocking would release the lock for
+        # every copy. Closing drops only this descriptor.
         lock = DaemonLock(tmp_path)
         assert lock.try_acquire()
-        inherited = lock.inheritable_copy()
+        assert lock._fd is not None
+        copy = os.dup(lock._fd)
 
-        lock.release()
+        getattr(lock, release)()
 
         try:
             # Still held, through the copy. An unlock-then-close release would
-            # have freed it here and let a second owner start.
-            assert daemon_is_running(tmp_path)
+            # have freed it here.
+            assert _held(tmp_path)
         finally:
-            os.close(inherited)
+            os.close(copy)
 
 
-class TestLiveness:
-    def test_no_lock_file_means_no_daemon(self, tmp_path: Path):
-        assert not daemon_is_running(tmp_path)
+class _Exited(BaseException):
+    """Raised by the ``os._exit`` double, so the test outlives the exit."""
 
-    def test_probing_does_not_disturb_the_holder(self, tmp_path: Path):
-        # Discovery calls this on every cold start, so it must not briefly
-        # exclude an owner that is starting up.
-        lock = DaemonLock(tmp_path)
-        assert lock.try_acquire()
-        try:
-            assert daemon_is_running(tmp_path)
-            assert daemon_is_running(tmp_path)
-            assert lock.held
-        finally:
-            lock.release()
 
-    def test_concurrent_probes_do_not_see_each_other(self, tmp_path: Path):
-        # The half of the trade the shared probe buys. Measured with an
-        # exclusive probe: 43 of 400 concurrent probes reported a daemon that
-        # did not exist, because one briefly held the lock and the other read
-        # its own sibling as an owner. Inventing an owner is the unrecoverable
-        # direction, which is why shared is preferred despite the cost pinned
-        # in the test below.
-        creator = DaemonLock(tmp_path)
-        assert creator.try_acquire()
-        creator.release()
+class _DiagnosticSink(logging.Handler):
+    """A DEBUG sink that, once armed, fails or stalls on every record.
 
-        answers: list[bool] = []
-        start = threading.Barrier(2)
+    The stall is bounded, so a regression costs this test two seconds rather
+    than the suite. Unarmed, it only records, which is how the test proves the
+    sink is reachable before it relies on the sink staying silent.
+    """
 
-        def probe() -> None:
-            start.wait()
-            answers.extend(daemon_is_running(tmp_path) for _ in range(200))
+    def __init__(self, mode: str) -> None:
+        super().__init__(logging.DEBUG)
+        self.mode = mode
+        self.armed = False
+        self.seen: list[str] = []
+        self.entered: list[str] = []
 
-        threads = [threading.Thread(target=probe) for _ in range(2)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+    def emit(self, record: logging.LogRecord) -> None:
+        if not self.armed:
+            self.seen.append(record.getMessage())
+            return
+        self.entered.append(record.getMessage())
+        if self.mode == "raises":
+            raise RuntimeError("the diagnostic sink failed")
+        threading.Event().wait(2.0)
 
-        assert answers and not any(answers)
 
-    def test_the_probe_is_an_observation_not_a_decision(self, tmp_path: Path):
-        # The other half, and the reason the docstring calls this a hint. There
-        # is no way to ask flock whether a lock is held without taking one, so a
-        # probe contends with a concurrent election: measured, 11 of 3000
-        # elections failed against a probe while no owner existed. Ownership is
-        # therefore decided by try_acquire alone, never by asking this first.
-        creator = DaemonLock(tmp_path)
-        assert creator.try_acquire()
-        creator.release()
+@contextlib.contextmanager
+def _debug_sink(mode: str) -> Generator[_DiagnosticSink]:
+    """Route every DEBUG record from the lock and the owner into one sink."""
+    sink = _DiagnosticSink(mode)
+    root = logging.getLogger()
+    loggers = (root, daemon_lock_module.logger, daemon_owner.logger)
+    saved = [
+        (logger, logger.level, logger.propagate, logger.disabled) for logger in loggers
+    ]
+    disabled = logging.root.manager.disable
+    logging.disable(logging.NOTSET)
+    for logger in loggers:
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = True
+        logger.disabled = False
+    root.addHandler(sink)
+    try:
+        yield sink
+    finally:
+        sink.armed = False
+        root.removeHandler(sink)
+        for logger, level, propagate, was_disabled in saved:
+            logger.setLevel(level)
+            logger.propagate = propagate
+            logger.disabled = was_disabled
+        logging.disable(disabled)
 
-        # An election is never wrong when nothing competes with it, which is
-        # the property callers may rely on.
-        for _ in range(50):
+
+def _exit_hard_status(lock: Any) -> int:
+    """Run the real ``_exit_hard`` and return the status it exits with."""
+
+    def exit_now(status: int) -> None:
+        raise _Exited(status)
+
+    # A patch scoped to this call alone. The autouse fixture's isolation must
+    # outlive it: the kernel probe below runs a child against the same home.
+    with (
+        mock.patch.object(daemon_owner.os, "_exit", exit_now),
+        pytest.raises(_Exited) as exited,
+    ):
+        daemon_owner._exit_hard(lock)
+    return exited.value.args[0]
+
+
+class TestTheTerminalRelease:
+    """``_exit_hard`` gives up the election and exits with no diagnostic between.
+
+    A log handler that blocks or raises after the lock is gone would hold the
+    exit, or divert it into ordinary unwinding, while a successor can already
+    take the election. The lock here is real, and whether it is free is asked
+    of the kernel from another process rather than read off ``lock.held``.
+    """
+
+    @pytest.mark.parametrize("mode", ["raises", "blocks"])
+    def test_no_diagnostic_stands_between_release_and_exit(
+        self, tmp_path: Path, mode: str
+    ):
+        with _debug_sink(mode) as sink:
             lock = DaemonLock(tmp_path)
             assert lock.try_acquire()
-            lock.release()
+            if not any("Daemon lock acquired" in line for line in sink.seen):
+                pytest.fail(f"the DEBUG sink never saw the lock: {sink.seen!r}")
+            sink.armed = True
 
-        # And the probe agrees with a settled state in both directions.
-        assert not daemon_is_running(tmp_path)
-        owner = DaemonLock(tmp_path)
-        assert owner.try_acquire()
-        try:
-            assert daemon_is_running(tmp_path)
-        finally:
-            owner.release()
+            status = _exit_hard_status(lock)
 
-    def test_a_stale_lock_file_does_not_look_alive(self, tmp_path: Path):
-        # The file is never unlinked, so it outlives the daemon that made it.
-        # Its presence must therefore mean nothing on its own: what counts is
-        # whether the lock inside it can be taken.
+        assert sink.entered == [], "a diagnostic ran between release and exit"
+        assert status == 1
+        free = _run_child(_TRY_ACQUIRE, str(tmp_path))
+        assert free.stdout.strip() == "ACQUIRED", free.stderr
+
+    def test_a_close_that_fails_still_exits_in_silence(self, tmp_path: Path):
         lock = DaemonLock(tmp_path)
         assert lock.try_acquire()
-        lock.release()
+        descriptor = lock._fd
+        assert descriptor is not None
+        real_close = os.close
 
-        assert daemon_lock_path(tmp_path).exists()
-        assert not daemon_is_running(tmp_path)
+        def close(fd: int) -> None:
+            if fd == descriptor:
+                raise OSError("the close did not happen")
+            real_close(fd)
+
+        try:
+            with (
+                _debug_sink("raises") as sink,
+                mock.patch.object(daemon_lock_module.os, "close", close),
+            ):
+                sink.armed = True
+                status = _exit_hard_status(lock)
+        finally:
+            real_close(descriptor)
+
+        assert sink.entered == [], "a failed close was reported before exit"
+        assert status == 1
+        assert not lock.held
+
+    def test_a_release_that_raises_still_exits(self):
+        def release_for_exit() -> None:
+            raise RuntimeError("the release failed")
+
+        lock = SimpleNamespace(release_for_exit=release_for_exit)
+
+        assert _exit_hard_status(lock) == 1
