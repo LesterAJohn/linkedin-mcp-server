@@ -1037,6 +1037,7 @@ class ConversationReader:
         await self._scroll_main_scrollable_region(
             position="bottom", attempts=scrolls, pause_time=0.5
         )
+        conversations = await self._extract_inbox_row_summaries(limit)
 
         raw_result = await self._content._extract_root_content(["main"])
         raw = raw_result["text"]
@@ -1056,6 +1057,23 @@ class ConversationReader:
         scan = await self._extract_conversation_thread_refs(
             limit=limit, context="inbox", scroll_attempts=scrolls
         )
+        for index, ref in enumerate(scan.refs):
+            if index >= len(conversations):
+                break
+            conversation = conversations[index]
+            thread_id = ref["url"].rstrip("/").rsplit("/", 1)[-1]
+            conversation["thread_id"] = thread_id
+            conversation["thread_url"] = ref["url"]
+            for key in (
+                "last_activity",
+                "preview",
+                "active",
+                "has_unread_marker",
+                "row_text",
+                "read_state_confidence",
+            ):
+                if key in conversation:
+                    ref[key] = conversation[key]
         if scan.refs:
             references = dedupe_references(scan.refs + references)
 
@@ -1070,7 +1088,75 @@ class ConversationReader:
         )
         if section_errors:
             result["section_errors"] = section_errors
+        result["conversations"] = conversations
+        result["conversation_counts"] = {
+            "total": len(conversations),
+            "read": sum(row["read_state"] == "read" for row in conversations),
+            "unread": sum(row["read_state"] == "unread" for row in conversations),
+            "unknown": sum(row["read_state"] == "unknown" for row in conversations),
+        }
+        result["inbox_scroll_diagnostics"] = {
+            "requested_limit": limit,
+            "loaded_count": len(conversations),
+            "scroll_attempts": scrolls,
+            "stopped_reason": (
+                "requested_limit" if len(conversations) >= limit else "visible_rows"
+            ),
+        }
         return result
+
+    async def _extract_inbox_row_summaries(self, limit: int) -> list[dict[str, Any]]:
+        """Read visible inbox row metadata before any row is opened."""
+        rows: list[dict[str, Any]] = await self._session.page.evaluate(
+            r"""({ limit }) => {
+                const normalize = value => String(value || '')
+                    .replace(/\s+/g, ' ').trim();
+                const labels = Array.from(document.querySelectorAll(
+                    'main li label[aria-label]'
+                )).slice(0, limit);
+                return labels.map(label => {
+                    const row = label.closest('li');
+                    if (!row) return null;
+                    const ariaLabel = normalize(label.getAttribute('aria-label'));
+                    const participant = ariaLabel.replace(
+                        /^Select conversation with\s+/i, ''
+                    ).trim();
+                    const rowText = normalize(row.innerText || '');
+                    const lines = [...new Set(
+                        String(row.innerText || '').split(/\n+/).map(normalize)
+                    )].filter(Boolean);
+                    const lastActivity = normalize(
+                        row.querySelector('time, [datetime]')?.textContent
+                    );
+                    const preview = lines.find(line =>
+                        line !== ariaLabel &&
+                        line !== participant &&
+                        line !== lastActivity
+                    ) || '';
+                    const unread = Boolean(row.querySelector('[data-test-unread]'));
+                    const readState = unread ? 'unread' : 'read';
+                    const active = Boolean(
+                        row.matches('[aria-current="page"], [aria-selected="true"]') ||
+                        row.querySelector(
+                            '[aria-current="page"], [aria-selected="true"], input:checked, [checked]'
+                        )
+                    );
+                    return {
+                        participant,
+                        aria_label: ariaLabel,
+                        row_text: rowText,
+                        last_activity: lastActivity,
+                        preview,
+                        active,
+                        has_unread_marker: unread,
+                        read_state_confidence: unread ? 'high' : 'low',
+                        read_state: readState,
+                    };
+                }).filter(Boolean);
+            }""",
+            {"limit": limit},
+        )
+        return [row for row in rows if isinstance(row, dict)]
 
     async def get_conversation(
         self,
@@ -1156,6 +1242,7 @@ class ConversationReader:
         await self._session.check_rate_limit()
         await self._session.dismiss_modal()
         await self._wait_for_main_text(log_context="Messaging search")
+        conversations = await self._extract_inbox_row_summaries(limit)
 
         raw_result = await self._content._extract_root_content(["main"])
         raw = raw_result["text"]
@@ -1173,6 +1260,20 @@ class ConversationReader:
         scan = await self._extract_conversation_thread_refs(
             limit=limit, context="search_results"
         )
+        for index, ref in enumerate(scan.refs):
+            if index >= len(conversations):
+                break
+            conversation = conversations[index]
+            for key in (
+                "last_activity",
+                "preview",
+                "active",
+                "has_unread_marker",
+                "row_text",
+                "read_state_confidence",
+            ):
+                if key in conversation:
+                    ref[key] = conversation[key]
         if scan.refs:
             references = dedupe_references(scan.refs + references)
 

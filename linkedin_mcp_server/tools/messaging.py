@@ -40,7 +40,7 @@ def register_messaging_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Get Inbox",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        annotations={"readOnlyHint": False, "openWorldHint": True},
         tags={"messaging"},
     )
     @tool_errors
@@ -60,6 +60,15 @@ def register_messaging_tools(
         reports that stop or unavailable scan rows; captured inbox text and
         independently extracted anchors retain their normal handling. A known
         thread_id can bypass row attribution when calling get_conversation.
+
+        Use to list recent inbox rows and their thread references. Do not use to
+        read a full thread (use get_conversation) or send a reply. Requires
+        network access, Patchright Chromium, and an authenticated LinkedIn
+        browser profile; this tool has no environment selector. Common failures
+        include an expired login, rate limiting, unavailable inbox rows, browser
+        failure, or timeout. Example input: {"limit": 10}. Response shape:
+        {"url": str, "sections": {...}, "conversations": [...],
+        "conversation_counts": {...}, "inbox_scroll_diagnostics": {...}}.
 
         Args:
             ctx: FastMCP context for progress reporting
@@ -90,7 +99,7 @@ def register_messaging_tools(
         # inbox by click-visiting rows, and LinkedIn marks a visited row as read.
         # The docstring below has always said so. An unread message the user has
         # not seen is state, and losing it is not something a reader should do.
-        annotations={"openWorldHint": True},
+        annotations={"readOnlyHint": False, "openWorldHint": True},
         tags={"messaging"},
     )
     @tool_errors
@@ -201,6 +210,15 @@ def register_messaging_tools(
         A result without that diagnostic does not guarantee that every
         conversation was enumerated.
 
+        Use to find conversations by message text. Do not use to read or reply
+        inside a known thread (use get_conversation or reply_to_conversation).
+        Requires network access, Patchright Chromium, and an authenticated
+        LinkedIn browser profile; this tool has no environment selector. Common
+        failures include an empty query, unavailable search rows, expired login,
+        rate limiting, browser failure, or timeout. Example input:
+        {"keywords": "project update", "limit": 10}. Response shape:
+        {"url": str, "sections": {"search_results": raw_text}, "references": [...]}.
+
         Args:
             keywords: Search keywords to filter conversations
             ctx: FastMCP context for progress reporting
@@ -251,6 +269,15 @@ def register_messaging_tools(
         Reversible on LinkedIn; a new message moves the thread back to the
         inbox.
 
+        Use only when the user asks to archive this specific thread. Do not use
+        to delete messages or mark the thread unread. Requires network access,
+        Patchright Chromium, and an authenticated LinkedIn browser profile; this
+        tool has no environment selector. Common failures include an invalid or
+        inaccessible thread, unavailable archive action, expired login, rate
+        limiting, browser failure, or timeout. Example input:
+        {"thread_id": "2-abc123"}. Response shape:
+        {"url": str, "thread_id": str, "status": "archived" | "already_archived"}.
+
         Args:
             thread_id: LinkedIn messaging thread ID, as get_inbox,
                 search_conversations or get_conversation return it
@@ -285,6 +312,7 @@ def register_messaging_tools(
         confirm_send: bool,
         ctx: Context,
         profile_urn: str | None = None,
+        attachment_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         Compose and send a new message to a LinkedIn user.
@@ -349,6 +377,8 @@ def register_messaging_tools(
                 action. It never bypasses recipient verification. Obtain via
                 get_person_profile. Note: inbox may not always show all messages;
                 use search_conversations as a fallback.
+            attachment_paths: Optional local file paths to upload as real
+                message attachments after confirmation.
 
         Returns:
             Dict with url, status, message, recipient_selected, sent, and
@@ -390,6 +420,11 @@ def register_messaging_tools(
             message,
             confirm_send=confirm_send,
             profile_urn=profile_urn,
+            **(
+                {"attachment_paths": attachment_paths}
+                if attachment_paths is not None
+                else {}
+            ),
         )
 
         try:
@@ -422,6 +457,7 @@ def register_messaging_tools(
         message: str,
         confirm_send: bool,
         ctx: Context,
+        attachment_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         Reply inside an existing LinkedIn messaging thread, InMail included.
@@ -446,6 +482,18 @@ def register_messaging_tools(
         private API is used. This is a write operation when confirm_send is
         True.
 
+        Use to answer a known existing thread, including InMail. Do not use
+        send_message for a reply or target a thread by username; resolve the
+        thread ID first with get_inbox or search_conversations. Requires network
+        access, Patchright Chromium, an authenticated LinkedIn browser profile,
+        and user authorization to send; this tool has no environment selector.
+        Common failures include an invalid or mismatched thread ID, unavailable
+        composer, invalid attachment path, expired login, rate limiting, browser
+        failure, or timeout. Example input:
+        {"thread_id": "2-abc123", "message": "Thanks!", "confirm_send": false}.
+        Response shape: {"url": str, "status": str, "sent": bool,
+        "retry_safe": bool, "thread_id": str, "participant": str | null}.
+
         Args:
             thread_id: LinkedIn messaging thread ID, or a /messaging/thread/<id>/
                 reference as another tool returned it
@@ -457,6 +505,8 @@ def register_messaging_tools(
                 the thread and composer, types nothing, and says who the reply
                 would go to.
             ctx: FastMCP context for progress reporting
+            attachment_paths: Optional local file paths to upload as real
+                message attachments after confirmation.
 
         Returns:
             Dict with url, status, message, recipient_selected, sent, retry_safe,
@@ -484,12 +534,77 @@ def register_messaging_tools(
             thread_id,
             message,
             confirm_send=confirm_send,
+            **(
+                {"attachment_paths": attachment_paths}
+                if attachment_paths is not None
+                else {}
+            ),
         )
 
         try:
             # Same window as send_message: a deadline here discards a result
             # that may say the reply was confirmed, so a notification that
             # stalls gives up first.
+            with before_the_reply_deadline():
+                await ctx.report_progress(progress=100, total=100, message="Complete")
+        except BaseException:
+            if result.get("retry_safe") is False:
+                logger.warning(SEND_INTERRUPTED_WARNING)
+            raise
+
+        return result
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Reply Message",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"messaging", "actions"},
+    )
+    @tool_errors
+    async def reply_message(
+        thread_id: str,
+        message: str,
+        confirm_send: bool,
+        ctx: Context,
+        attachment_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Reply in an existing thread using the fork's original tool name.
+
+        Use for replying to a verified existing conversation by thread ID. Do
+        not use when only a username is known; find a thread with
+        search_conversations first. Requires network access, an authenticated
+        LinkedIn browser profile, and user authorization to send. It uses the
+        active profile and has no environment selector.
+
+        Response: the same URL, status, message, sent, retry_safe, thread_id,
+        and participant fields as reply_to_conversation, plus attachment names
+        when supplied. Common failures include an invalid or mismatched
+        thread ID, unavailable composer, invalid attachment path, expired login,
+        rate limiting, browser failure, or timeout. Use get_conversation to
+        verify context first. Example input:
+        {"thread_id": "2-abc123", "message": "Thanks!", "confirm_send": false}.
+        """
+        refusal = refuse_an_invalid_reply(thread_id, message)
+        if refusal is not None:
+            return refusal
+        thread_id = reply_thread_id(thread_id)
+        extractor = await get_ready_extractor(ctx, tool_name="reply_message")
+        logger.info("Replying in thread %s (confirm_send=%s)", thread_id, confirm_send)
+
+        await ctx.report_progress(progress=0, total=100, message="Sending reply")
+
+        result = await extractor.reply_to_conversation(
+            thread_id,
+            message,
+            confirm_send=confirm_send,
+            **(
+                {"attachment_paths": attachment_paths}
+                if attachment_paths is not None
+                else {}
+            ),
+        )
+
+        try:
             with before_the_reply_deadline():
                 await ctx.report_progress(progress=100, total=100, message="Complete")
         except BaseException:

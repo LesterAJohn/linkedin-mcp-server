@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import socket
 from pathlib import Path
 from collections.abc import Coroutine, Mapping
 from typing import Any, TypeVar
@@ -606,7 +607,8 @@ class BrowserManager:
             # service workers at all. See the browser identity rules in
             # AGENTS.md and the measurements in docs/browser-fingerprint.md.
             try:
-                self._context = await driver.chromium.launch_persistent_context(
+                self._context = await _launch_persistent_context_with_profile_guard(
+                    driver.chromium,
                     self.user_data_dir,
                     **context_options,
                 )
@@ -699,7 +701,8 @@ class BrowserManager:
                 context_options.pop("no_viewport", None)
                 context_options.update(self._geometry())
                 try:
-                    self._context = await driver.chromium.launch_persistent_context(
+                    self._context = await _launch_persistent_context_with_profile_guard(
+                        driver.chromium,
                         self.user_data_dir,
                         **context_options,
                     )
@@ -925,11 +928,6 @@ class BrowserManager:
                 confirmed = False
                 logger.error("Error stopping playwright: %s", exc)
 
-        if confirmed and _chromium_singleton_still_blocks_reopen(
-            Path(self.user_data_dir)
-        ):
-            confirmed = False
-
         logger.info("Browser closed")
         # The API's own verdict is not the browser's. Patchright waits for the
         # leader it spawned and for its temporary directories, and signals the
@@ -951,6 +949,10 @@ class BrowserManager:
             self._process_marker,
             containment=self._containment,
         )
+        if drained and _chromium_singleton_still_blocks_reopen(
+            Path(self.user_data_dir)
+        ):
+            drained = False
         if not drained:
             logger.error(
                 "Browser processes from this launch are still running after "

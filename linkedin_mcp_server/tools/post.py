@@ -50,6 +50,14 @@ def register_post_tools(
         a formal job listing exists. This is global content search, distinct
         from get_feed (your own home feed) and get_company_posts (one
         company's page).
+        Do not use it to inspect a single company's posts or your home feed;
+        use get_company_posts or get_feed for those.
+        Requires network access, Patchright Chromium, and an authenticated
+        LinkedIn browser profile; this tool has no environment selector. Common
+        failures include unsupported filters, invalid paging, expired login,
+        rate limiting, browser failure, or timeout. Example input:
+        {"keywords": "we are hiring", "max_pages": 2}. Response shape:
+        {"url": str, "sections": {"search_results": raw_text}, "references": [...]}.
 
         Args:
             keywords: Search keywords (e.g., "Buscamos Unity", "AI automation hiring")

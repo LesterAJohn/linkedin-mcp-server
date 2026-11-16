@@ -95,7 +95,14 @@ def register_job_tools(
         """
         Get how a job posting takes applications, and the employer's application link.
 
-        Reads the posting without clicking anything.
+        Use when the job ID is known and only its application route is needed. Do
+        not use for the full posting (use get_job_details) or to read an Easy
+        Apply form (use get_easy_apply_form). Requires network access, Patchright
+        Chromium, and an authenticated LinkedIn browser profile; this tool has no
+        environment selector. Common failures include an invalid or inaccessible
+        job ID, expired login, rate limiting, browser failure, or timeout. Example
+        input: {"job_id": "4252026496"}. Response shape:
+        {"url": str, "apply": {"type": str, "url"?: str}}.
 
         Args:
             job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
@@ -146,6 +153,16 @@ def register_job_tools(
         Review and Submit are never clicked, and the dialog is closed with its
         draft discarded.
 
+        Use only to inspect a known job's Easy Apply questions. Do not use to
+        submit an application or when only the posting or external application
+        link is needed (use get_job_details or get_job_apply_url). Requires
+        network access, Patchright Chromium, and an authenticated LinkedIn
+        browser profile; this tool has no environment selector. Common failures
+        include an invalid or inaccessible job ID, expired login, rate limiting,
+        browser failure, or a draft that could not be discarded. Example input:
+        {"job_id": "4252026496"}. Response shape:
+        {"url": str, "apply": {"type": str}, "form": {"steps": [...], "complete": bool}}.
+
         Args:
             job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
             ctx: FastMCP context for progress reporting
@@ -193,6 +210,15 @@ def register_job_tools(
         Search for jobs on LinkedIn.
 
         Returns job_ids that can be passed to get_job_details for full info.
+
+        Use for job discovery with LinkedIn's supported filters. Do not use when
+        a job ID is already known (use get_job_details). Requires network access,
+        Patchright Chromium, and an authenticated LinkedIn browser profile. The
+        active profile is selected by the server; this tool has no environment
+        selector. Common failures include unsupported filters, invalid paging,
+        expired login, rate limiting, browser failure, or timeout. Example input:
+        {"keywords": "data scientist", "location": "Remote", "max_pages": 2}.
+        Response: {"url": str, "sections": {name: raw_text}, "job_ids": [...]}.
 
         LinkedIn is moving accounts to a redesigned job search, which keeps
         only the keywords, date_posted and paging. It drops the filters
@@ -281,6 +307,15 @@ def register_job_tools(
 
         Returns job_ids that can be passed to get_job_details for full info.
 
+        Use when checking the user's saved or tracked applications. Do not use
+        for job discovery (use search_jobs) or posting details (use
+        get_job_details). Requires network access, Patchright Chromium, and an
+        authenticated LinkedIn browser profile; this tool has no environment
+        selector. Common failures include unsupported tracker stages, invalid
+        paging, expired login, rate limiting, browser failure, or timeout.
+        Example input: {"stage": "saved", "max_pages": 2}. Response shape:
+        {"url": str, "sections": {name: raw_text}, "job_ids": [...]}.
+
         Args:
             ctx: FastMCP context for progress reporting
             max_pages: Maximum number of tracker pages to load (1-10, default 3)
@@ -328,6 +363,15 @@ def register_job_tools(
         is gone. Irreversible: LinkedIn offers no undo after a reload. A job
         that search does not list on its first page is an error, since an
         already dismissed job and a search that missed it look the same.
+
+        Use only when the user explicitly asks to dismiss this job. Do not use
+        to save a job or change its application status. Requires network access,
+        Patchright Chromium, and an authenticated LinkedIn browser profile; this
+        tool has no environment selector. Common failures include an invalid or
+        inaccessible job ID, the job not appearing in the first search page,
+        expired login, rate limiting, browser failure, or timeout. Example
+        input: {"job_id": "4252026496"}. Response shape:
+        {"url": str, "job_id": str, "dismissed": bool}.
 
         Args:
             job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")

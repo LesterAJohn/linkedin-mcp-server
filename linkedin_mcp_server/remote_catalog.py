@@ -125,6 +125,7 @@ LONG_OPTIONS = (
     "--login-viewer",
     "--status",
     "--logout",
+    "--user-id",
     "--user-data-dir",
     "--installer-temp-dir",
     "--claim-profile-root",

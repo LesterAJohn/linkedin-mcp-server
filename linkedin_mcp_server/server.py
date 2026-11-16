@@ -381,7 +381,12 @@ def create_mcp_server(
             In shared-browser mode these observations belong to the owner, not to a
             frontend running a login. It answers during browser work without refreshing
             the browser idle timer. Use ordinary LinkedIn tools directly for their
-            requested work rather than adding a status preflight.
+            requested work rather than adding a status preflight. Do not use this as
+            proof that LinkedIn will accept a request or as a preflight for ordinary
+            tools. Requires access to the configured local session paths and process
+            state; it has no LinkedIn environment selector. Common failures include
+            unreadable session files or unavailable process observations. Example
+            input: {}. Response shape: {"session": {...}, "server": {...}}.
             """
             try:
                 return session_status()

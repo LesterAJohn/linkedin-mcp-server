@@ -271,6 +271,7 @@ class LinkedInExtractor:
         *,
         confirm_send: bool,
         profile_urn: str | None = None,
+        attachment_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Compose and send a new message with explicit confirmation gating."""
         return await self._message_sender.send_message(
@@ -278,6 +279,7 @@ class LinkedInExtractor:
             message,
             confirm_send=confirm_send,
             profile_urn=profile_urn,
+            attachment_paths=attachment_paths,
         )
 
     async def reply_to_conversation(
@@ -286,10 +288,12 @@ class LinkedInExtractor:
         message: str,
         *,
         confirm_send: bool,
+        attachment_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Reply inside an existing thread with explicit confirmation gating."""
         return await self._message_sender.reply_to_conversation(
             thread_id,
             message,
             confirm_send=confirm_send,
+            attachment_paths=attachment_paths,
         )

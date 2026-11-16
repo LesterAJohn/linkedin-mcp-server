@@ -937,6 +937,19 @@ class TestOpenConversationByUsername:
         resolve.assert_not_awaited()
 
 
+def _empty_inbox_metadata(limit: int) -> dict[str, Any]:
+    return {
+        "conversations": [],
+        "conversation_counts": {"total": 0, "read": 0, "unread": 0, "unknown": 0},
+        "inbox_scroll_diagnostics": {
+            "requested_limit": limit,
+            "loaded_count": 0,
+            "scroll_attempts": max(1, limit // 10),
+            "stopped_reason": "visible_rows",
+        },
+    }
+
+
 class TestGetInbox:
     async def test_returns_inbox_section(self, mock_page):
         reader = _reader(mock_page)
@@ -964,15 +977,11 @@ class TestGetInbox:
         assert result == {
             "url": "https://www.linkedin.com/messaging/",
             "sections": {"inbox": "Conversation A\nConversation B"},
+            **_empty_inbox_metadata(10),
         }
 
-    async def test_an_empty_inbox_omits_the_optional_keys(self, mock_page):
-        """``sections`` stays but is empty, and ``references`` is absent.
-
-        An empty-string section and an empty reference list are both
-        indistinguishable from a read that worked and found nothing, which is
-        the opposite of what an empty page means.
-        """
+    async def test_an_empty_inbox_includes_empty_summary_metadata(self, mock_page):
+        """An empty text result still reports empty summaries and counts."""
         reader = _reader(mock_page)
         with (
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
@@ -998,7 +1007,64 @@ class TestGetInbox:
         assert result == {
             "url": "https://www.linkedin.com/messaging/",
             "sections": {},
+            **_empty_inbox_metadata(5),
         }
+
+    async def test_row_summaries_are_attached_to_the_matching_thread(self, mock_page):
+        conversation = {
+            "participant": "Ada Lovelace",
+            "last_activity": "Yesterday",
+            "preview": "The example is ready.",
+            "active": True,
+            "has_unread_marker": True,
+            "row_text": "Ada Lovelace Yesterday The example is ready.",
+            "read_state_confidence": "high",
+            "read_state": "unread",
+        }
+        thread = _ref("/messaging/thread/2-ada/", "Ada Lovelace", "inbox")
+        reader = _reader(mock_page)
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                reader, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                reader,
+                "_extract_inbox_row_summaries",
+                new_callable=AsyncMock,
+                return_value=[conversation],
+            ),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_root("Inbox text"),
+            ),
+            patch.object(
+                reader,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=_scan(thread),
+            ),
+        ):
+            result = await reader.get_inbox(limit=10)
+
+        assert result["conversations"] == [
+            {
+                **conversation,
+                "thread_id": "2-ada",
+                "thread_url": "/messaging/thread/2-ada/",
+            }
+        ]
+        assert result["conversation_counts"] == {
+            "total": 1,
+            "read": 0,
+            "unread": 1,
+            "unknown": 0,
+        }
+        assert result["references"]["inbox"][0]["has_unread_marker"] is True
+        assert result["inbox_scroll_diagnostics"]["loaded_count"] == 1
 
     async def test_text_is_read_on_the_inbox_and_rows_are_clicked_on_compose(
         self, mock_page, session_boundaries
@@ -1206,6 +1272,7 @@ class TestGetInbox:
                     "error_message": _stopped_message("Bob Stall"),
                 }
             },
+            **_empty_inbox_metadata(10),
         }
 
     async def test_a_stop_is_reported_without_text_and_for_an_unnamed_row(
@@ -1225,6 +1292,7 @@ class TestGetInbox:
                     "error_message": _stopped_message("(unnamed row)"),
                 }
             },
+            **_empty_inbox_metadata(10),
         }
 
     @pytest.mark.parametrize("start", [None, "2-open"])
@@ -1273,6 +1341,7 @@ class TestGetInbox:
                 ]
             },
             "section_errors": {"inbox": ROWS_UNAVAILABLE},
+            **_empty_inbox_metadata(10),
         }
 
     async def test_a_complete_scan_adds_no_error_mapping(self, mock_page):

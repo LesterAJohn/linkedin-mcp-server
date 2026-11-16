@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -11,6 +12,7 @@ from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from typing import Any, cast
 
 from linkedin_mcp_server.core import browser as browser_module
 from linkedin_mcp_server.core.browser import BrowserManager
@@ -131,6 +133,9 @@ class TestChromiumSingletonCleanup:
 
         class _Page:
             url = "about:blank"
+
+            def on(self, *_args, **_kwargs):
+                return None
 
         class _Context:
             pages = [_Page()]

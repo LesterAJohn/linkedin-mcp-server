@@ -237,6 +237,10 @@ def _text(raw: str) -> str:
     return raw
 
 
+def _optional_text(raw: str) -> str | None:
+    return raw.strip() or None
+
+
 def _flag(raw: str) -> bool:
     """An on/off value.
 
@@ -349,6 +353,13 @@ def _browser[T](name: str) -> Callable[[AppConfig, T], None]:
 def _server[T](name: str) -> Callable[[AppConfig, T], None]:
     """Store a setting's value in the server field *name*."""
     return lambda config, value: setattr(config.server, name, value)
+
+
+def _set_user_id(config: AppConfig, value: str | None) -> None:
+    if value is None:
+        config.server.user_id = None
+        return
+    config.server.user_id = value.strip() or None
 
 
 def _set_transport(config: AppConfig, transport: str) -> None:
@@ -797,6 +808,17 @@ SETTINGS: tuple[Setting, ...] = (
         apply=_server("logout"),
     ),
     Setting(
+        env=Env(EnvironmentKeys.USER_ID, _optional_text),
+        cli=Option(
+            flag="--user-id",
+            parse=_text,
+            cli_empty="parse",
+            metavar="ID",
+            help="Optional logical user identity for profile/session selection",
+        ),
+        apply=_set_user_id,
+    ),
+    Setting(
         env=Env(EnvironmentKeys.USER_DATA_DIR, _text),
         cli=Option(
             flag="--user-data-dir",
@@ -983,13 +1005,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
+def load_from_args(config: AppConfig, argv: Sequence[str] | None = None) -> AppConfig:
     """Load configuration from command line arguments.
 
     An option applies whenever it was given, including as 0 or as a ``--no-``
     switch. What an explicit empty value means is the option's ``cli_empty``.
     """
-    args = build_parser().parse_args(argv)
+    args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
     for setting in SETTINGS:
         if setting.cli is not None and (value := setting.cli.given(args)) is not None:
             setting.apply(config, value)

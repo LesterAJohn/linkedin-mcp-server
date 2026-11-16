@@ -5,6 +5,8 @@ import logging
 import os
 import signal
 import sys
+import threading
+import time
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -59,7 +61,7 @@ from linkedin_mcp_server.session_state import (
 )
 from linkedin_mcp_server import remote_tools
 from linkedin_mcp_server.server import ServerRole, create_mcp_server
-from linkedin_mcp_server.server_role import process_role
+from linkedin_mcp_server.server_role import process_role, stand_down_reason
 from linkedin_mcp_server.setup import run_profile_creation
 
 if TYPE_CHECKING:
@@ -991,7 +993,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 #
                 # Deliberately no host wildcard: it would accept any Host and
                 # reopen the same hole from the other side.
-                if proxy_backend is None:
+                if shared is None or isinstance(shared, Unanswered):
                     start_direct_stand_down_monitor()
                 mcp.run(
                     transport=transport,

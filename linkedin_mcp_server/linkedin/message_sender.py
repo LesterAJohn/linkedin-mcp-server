@@ -10,11 +10,13 @@ import logging
 import math
 import re
 import time
+from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import ParseResult, parse_qs, unquote, urljoin, urlparse
 
 import anyio
 import anyio.lowlevel
+from patchright.async_api import Error as PlaywrightError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.destination import raise_if_off_linkedin
@@ -35,6 +37,12 @@ from linkedin_mcp_server.linkedin.session import PageSession
 logger = logging.getLogger(__name__)
 
 _MESSAGING_COMPOSE_SELECTOR = '[role="textbox"][contenteditable="true"]'
+_MESSAGING_ATTACHMENT_INPUT_SELECTOR = (
+    "main input[type='file'], "
+    "[role='dialog'] input[type='file'], "
+    "dialog input[type='file'], "
+    "input[type='file']"
+)
 
 _PROFILE_MESSAGE_TARGET_JS = r"""() => {
     const visible = element => {
@@ -1984,6 +1992,7 @@ class MessageSender:
         *,
         confirm_send: bool,
         profile_urn: str | None = None,
+        attachment_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Compose and send a new message with explicit confirmation gating.
 
@@ -2004,6 +2013,7 @@ class MessageSender:
         refusal = contracts.refuse_an_invalid_message(linkedin_username, message)
         if refusal is not None:
             return refusal
+        normalized_attachments = self._normalize_attachment_paths(attachment_paths)
         # Every later step writes, compares and cleans up this one text, so
         # the editor holds what LinkedIn will send and the confirmation looks
         # for the same lines.
@@ -2137,6 +2147,7 @@ class MessageSender:
             target=target,
             expected_route=expected_route,
             budget_deadline=budget_deadline,
+            attachment_paths=normalized_attachments,
         )
 
     async def _submit_to_verified_composer(
@@ -2147,6 +2158,7 @@ class MessageSender:
         expected_route: str,
         budget_deadline: float = math.inf,
         respond: Callable[..., dict[str, Any]] | None = None,
+        attachment_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Type into the verified composer, submit once and confirm the send.
 
@@ -2154,8 +2166,13 @@ class MessageSender:
         Every answer carries ``recipient_selected=True``; ``retry_safe`` turns
         false from the moment a submission is attempted.
         """
+        attachment_names = (
+            [Path(path).name for path in attachment_paths] if attachment_paths else None
+        )
         respond = partial(
-            respond or contracts.message_action_result, recipient_selected=True
+            respond or contracts.message_action_result,
+            recipient_selected=True,
+            attachments=attachment_names,
         )
         if self._page.url != expected_route:
             return respond(
@@ -2204,6 +2221,15 @@ class MessageSender:
                     self._page.url,
                     "recipient_resolution_failed",
                     "The verified message composer changed before text entry.",
+                )
+
+            if attachment_paths and not await self._upload_message_attachments(
+                attachment_paths
+            ):
+                return respond(
+                    self._page.url,
+                    "attachment_upload_failed",
+                    "LinkedIn did not accept the provided attachment files.",
                 )
 
             try:
@@ -2405,6 +2431,7 @@ class MessageSender:
         message: str,
         *,
         confirm_send: bool,
+        attachment_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Reply inside one existing thread with explicit confirmation gating.
 
@@ -2419,6 +2446,7 @@ class MessageSender:
         refusal = contracts.refuse_an_invalid_reply(thread_id, message)
         if refusal is not None:
             return refusal
+        normalized_attachments = self._normalize_attachment_paths(attachment_paths)
         # The text LinkedIn will send, as send_message types and confirms it.
         message = contracts.normalize_message_text(message)
         target = _thread_target(thread_id)
@@ -2499,4 +2527,48 @@ class MessageSender:
             expected_route=expected_route,
             budget_deadline=budget_deadline,
             respond=respond,
+            attachment_paths=normalized_attachments,
         )
+
+    @staticmethod
+    def _normalize_attachment_paths(
+        attachment_paths: list[str] | None,
+    ) -> list[str]:
+        """Validate, resolve, and deduplicate local attachment paths."""
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_path in attachment_paths or []:
+            candidate = raw_path.strip()
+            if not candidate:
+                raise LinkedInOperationError(
+                    "attachment_paths must not contain empty values"
+                )
+            path = Path(candidate).expanduser()
+            try:
+                resolved = path.resolve(strict=True)
+            except (FileNotFoundError, OSError, RuntimeError) as exc:
+                raise LinkedInOperationError(
+                    f"Attachment file not found or inaccessible: {path}"
+                ) from exc
+            if not resolved.is_file():
+                raise LinkedInOperationError(
+                    f"Attachment path is not a file: {resolved}"
+                )
+            resolved_path = str(resolved)
+            if resolved_path not in seen:
+                seen.add(resolved_path)
+                normalized.append(resolved_path)
+        return normalized
+
+    async def _upload_message_attachments(self, attachment_paths: list[str]) -> bool:
+        """Upload files using LinkedIn's message attachment input."""
+        try:
+            input_locator = self._page.locator(_MESSAGING_ATTACHMENT_INPUT_SELECTOR)
+            if await input_locator.count() == 0:
+                return False
+            await input_locator.first.set_input_files(attachment_paths)
+            await asyncio.sleep(0.75)
+            return True
+        except (PlaywrightError, OSError):
+            logger.warning("LinkedIn attachment upload failed", exc_info=True)
+            return False

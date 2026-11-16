@@ -93,6 +93,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `archive_conversation` | Archive a conversation by thread ID; a repeat call reports it already archived. |
 | `send_message` | Message a profile after confirmation. Threads use `reply_to_conversation`. |
 | `reply_to_conversation` | Reply inside an existing thread or InMail by thread ID. Sends after confirmation. |
+| `reply_message` | Compatibility alias for `reply_to_conversation`, retained for existing fork clients. |
 | `get_company_profile` | Read company information, with optional sections for posts and open jobs. |
 | `get_company_posts` | Read recent posts from a company's feed, with links to the original posts. |
 | `search_companies` | Find companies by keyword and return links to their LinkedIn profiles. |

@@ -905,12 +905,9 @@ class TestLoaders:
 
     def test_args_user_id_overrides_env(self, monkeypatch):
         monkeypatch.setenv("USER_ID", "env-user")
-        monkeypatch.setattr(
-            "sys.argv", ["linkedin-mcp-server", "--user-id", "arg-user"]
-        )
         from linkedin_mcp_server.config import load_config
 
-        config = load_config()
+        config = load_config(["--user-id", "arg-user"])
         assert config.server.user_id == "arg-user"
 
     def test_load_from_args_fortisai_uvx_profile_capture(self, monkeypatch):
@@ -1544,6 +1541,22 @@ _CASES: dict[str, _Cases] = {
             ("--port", "9100"): 9100,
             ("--port", ""): EXIT_2,
             ("--port", "http"): EXIT_2,
+        },
+    ),
+    "USER_ID": _Cases(
+        "text",
+        ("server.user_id",),
+        env={
+            None: KEEP,
+            "": KEEP,
+            "   ": None,
+            "env-user": "env-user",
+        },
+        cli={
+            (): KEEP,
+            ("--user-id", ""): None,
+            ("--user-id", "  "): None,
+            ("--user-id", "cli-user"): "cli-user",
         },
     ),
     "HTTP_PATH": _Cases(

@@ -107,6 +107,7 @@ def message_action_result(
     sent: bool = False,
     retry_safe: bool = True,
     thread_id: str | None | _Omitted = _OMITTED,
+    attachments: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build a structured response for the send_message tool.
 
@@ -131,6 +132,8 @@ def message_action_result(
     }
     if not isinstance(thread_id, _Omitted):
         result["thread_id"] = thread_id
+    if attachments is not None:
+        result["attachments"] = attachments
     return result
 
 
@@ -187,6 +190,7 @@ def reply_action_result(
     recipient_selected: bool = False,
     sent: bool = False,
     retry_safe: bool = True,
+    attachments: list[str] | None = None,
 ) -> dict[str, Any]:
     """``message_action_result`` for reply_to_conversation, plus its thread.
 
@@ -201,6 +205,7 @@ def reply_action_result(
             recipient_selected=recipient_selected,
             sent=sent,
             retry_safe=retry_safe,
+            attachments=attachments,
         ),
         "thread_id": thread_id,
         "participant": participant,

@@ -16,7 +16,10 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 import pytest
 
-from linkedin_mcp_server.core.exceptions import InvalidReferenceError
+from linkedin_mcp_server.core.exceptions import (
+    InvalidReferenceError,
+    LinkedInOperationError,
+)
 from linkedin_mcp_server.linkedin import contracts
 from linkedin_mcp_server.linkedin import message_sender as message_sender_module
 from linkedin_mcp_server.linkedin.message_sender import (
@@ -480,7 +483,11 @@ class TestSendMessage:
             ),
         )
 
-    async def test_dry_run_returns_before_focus_or_text_entry(self, mock_page):
+    async def test_dry_run_returns_before_focus_or_text_entry(
+        self, mock_page, tmp_path
+    ):
+        attachment = tmp_path / "draft.pdf"
+        attachment.write_bytes(b"test")
         sender = _sender(mock_page)
         patches = self._patch_to_composer(sender, mock_page)
         with (
@@ -492,14 +499,45 @@ class TestSendMessage:
             patches[6] as focus,
             patches[7] as submit,
             patches[8],
+            patch.object(
+                sender, "_upload_message_attachments", new_callable=AsyncMock
+            ) as upload,
         ):
-            result = await sender.send_message("testuser", "Hello!", confirm_send=False)
+            result = await sender.send_message(
+                "testuser",
+                "Hello!",
+                confirm_send=False,
+                attachment_paths=[str(attachment)],
+            )
 
         assert result["status"] == "confirmation_required"
         assert result["recipient_selected"] is True
         focus.assert_not_awaited()
         submit.assert_not_awaited()
+        upload.assert_not_awaited()
         mock_page.keyboard.type.assert_not_awaited()
+
+    def test_attachment_paths_are_resolved_and_deduplicated(self, tmp_path):
+        attachment = tmp_path / "draft.pdf"
+        attachment.write_bytes(b"test")
+        alias = tmp_path / "alias.pdf"
+        alias.symlink_to(attachment)
+
+        assert MessageSender._normalize_attachment_paths(
+            [str(attachment), str(alias)]
+        ) == [str(attachment.resolve())]
+
+    @pytest.mark.parametrize("target", ["missing.pdf", "."])
+    def test_attachment_paths_must_be_existing_files(self, tmp_path, target):
+        with pytest.raises(LinkedInOperationError, match="Attachment"):
+            MessageSender._normalize_attachment_paths([str(tmp_path / target)])
+
+    def test_attachment_paths_refuse_symlink_loops(self, tmp_path):
+        loop = tmp_path / "loop.pdf"
+        loop.symlink_to(loop)
+
+        with pytest.raises(LinkedInOperationError, match="inaccessible"):
+            MessageSender._normalize_attachment_paths([str(loop)])
 
     async def test_rejects_supplied_urn_before_compose_navigation(self, mock_page):
         sender = _sender(mock_page)

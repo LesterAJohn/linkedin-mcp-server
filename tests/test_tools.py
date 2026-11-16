@@ -309,6 +309,11 @@ _A_VALID_CALL = [
         "reply_to_conversation",
         {"thread_id": "2-abc123", "message": "Hello", "confirm_send": False},
     ),
+    (
+        "messaging",
+        "reply_message",
+        {"thread_id": "2-abc123", "message": "Hello", "confirm_send": False},
+    ),
     ("feed", "get_feed", {}),
     ("post", "search_posts", {"keywords": "python"}),
 ]
@@ -2126,7 +2131,6 @@ class TestMessagingTools:
             "Hello!",
             confirm_send=True,
             profile_urn=None,
-            attachment_paths=None,
         )
 
     async def test_send_message_description_explains_connection_handoff(self):
@@ -2385,10 +2389,9 @@ class TestMessagingTools:
             "Hello!",
             confirm_send=True,
             profile_urn="ACoAAB1IelEB",
-            attachment_paths=None,
         )
 
-    async def test_send_message_with_attachments(self, mock_context):
+    async def test_send_message_with_attachments(self, mock_context, serve_extractor):
         expected = {
             "url": "https://www.linkedin.com/messaging/thread/abc123/",
             "status": "sent",
@@ -2403,6 +2406,7 @@ class TestMessagingTools:
 
         mcp = FastMCP("test")
         register_messaging_tools(mcp)
+        serve_extractor(mock_extractor)
 
         tool_fn = await get_tool_fn(mcp, "send_message")
         result = await tool_fn(
@@ -2411,7 +2415,6 @@ class TestMessagingTools:
             True,
             mock_context,
             attachment_paths=["/tmp/brief.pdf", "/tmp/portfolio.zip"],
-            extractor=mock_extractor,
         )
 
         assert result["status"] == "sent"
@@ -2965,13 +2968,21 @@ class TestToolDefinitions:
             "search_companies",
             "get_company_employees",
             "get_job_details",
+            "get_job_apply_url",
+            "get_easy_apply_form",
             "search_jobs",
+            "get_saved_jobs",
             "get_inbox",
             "get_conversation",
             "search_conversations",
+            "archive_conversation",
+            "dismiss_job",
             "send_message",
+            "reply_to_conversation",
             "reply_message",
+            "get_session_status",
             "get_feed",
+            "search_posts",
             "close_session",
         )
         required_guidance = (
@@ -3004,7 +3015,7 @@ class TestToolDefinitions:
             tool = await mcp.get_tool(name)
             assert tool is not None
             assert tool.annotations is not None
-            assert tool.annotations.readOnlyHint is False
+            assert tool.annotations.read_only_hint is False
 
 
 class TestPostTools:
@@ -3097,6 +3108,7 @@ class TestToolTimeouts:
             "get_company_posts",
             "get_job_details",
             "get_job_apply_url",
+            "get_easy_apply_form",
             "search_jobs",
             "get_saved_jobs",
             "get_inbox",
@@ -3105,8 +3117,10 @@ class TestToolTimeouts:
             "archive_conversation",
             "send_message",
             "reply_to_conversation",
+            "reply_message",
             "get_feed",
             "search_posts",
+            "get_session_status",
             "close_session",
         )
 
@@ -3141,8 +3155,10 @@ class TestToolTimeouts:
             "archive_conversation",
             "send_message",
             "reply_to_conversation",
+            "reply_message",
             "get_feed",
             "search_posts",
+            "get_session_status",
             "close_session",
         )
 
