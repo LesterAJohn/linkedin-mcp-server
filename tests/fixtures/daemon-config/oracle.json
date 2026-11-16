@@ -51,7 +51,8 @@
           "port": 8000,
           "path": "/mcp",
           "tool_timeout_seconds": 180.0,
-          "daemon_enabled": false
+          "daemon_enabled": false,
+          "user_id": null
         }
       },
       "encoded": {
@@ -139,7 +140,8 @@
           "port": 8000,
           "path": "/mcp",
           "tool_timeout_seconds": 90.5,
-          "daemon_enabled": true
+          "daemon_enabled": true,
+          "user_id": null
         }
       },
       "encoded": {
@@ -268,7 +270,8 @@
           "port": 8123,
           "path": "/mcp",
           "tool_timeout_seconds": 30.0,
-          "daemon_enabled": false
+          "daemon_enabled": false,
+          "user_id": null
         }
       },
       "encoded": {
@@ -369,7 +372,8 @@
           "port": 8000,
           "path": "/retained",
           "tool_timeout_seconds": 180.0,
-          "daemon_enabled": false
+          "daemon_enabled": false,
+          "user_id": null
         }
       },
       "encoded": {
@@ -451,7 +455,8 @@
           "port": 9100,
           "path": "/cli",
           "tool_timeout_seconds": 180.0,
-          "daemon_enabled": false
+          "daemon_enabled": false,
+          "user_id": null
         }
       },
       "encoded": {
@@ -527,7 +532,8 @@
           "port": 8000,
           "path": "/mcp",
           "tool_timeout_seconds": 180.0,
-          "daemon_enabled": false
+          "daemon_enabled": false,
+          "user_id": null
         }
       },
       "encoded": {
@@ -610,7 +616,8 @@
           "port": 8000,
           "path": "/mcp",
           "tool_timeout_seconds": 180.0,
-          "daemon_enabled": false
+          "daemon_enabled": false,
+          "user_id": null
         }
       },
       "encoded": {
@@ -682,7 +689,8 @@
           "port": 8000,
           "path": "/mcp",
           "tool_timeout_seconds": 180.0,
-          "daemon_enabled": false
+          "daemon_enabled": false,
+          "user_id": null
         }
       },
       "encoded": {
@@ -757,7 +765,8 @@
           "port": 8000,
           "path": "/mcp",
           "tool_timeout_seconds": 180.0,
-          "daemon_enabled": false
+          "daemon_enabled": false,
+          "user_id": null
         }
       },
       "encoded": {
@@ -834,7 +843,8 @@
           "port": 8000,
           "path": "/mcp",
           "tool_timeout_seconds": 180.0,
-          "daemon_enabled": true
+          "daemon_enabled": true,
+          "user_id": null
         }
       },
       "encoded": {

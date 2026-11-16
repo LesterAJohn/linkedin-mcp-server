@@ -155,21 +155,20 @@ def hard_exit_required() -> bool:
 
 
 def a_held_profile_means_this_owner_must_go(lease: Any | None = None) -> None:
-    """Give way if this is an owner an unconfirmed teardown has stranded.
+    """Give way if an unconfirmed teardown has stranded this browser server.
 
     One function rather than the same three lines at each site, because the sites
     kept being found one at a time. A browser whose shutdown could not be
-    confirmed keeps the profile lease until its process exits, deliberately. For
-    a single-process server the resulting "restart the server" is actionable: its
-    client owns it. A detached owner outlives that client, so restarting elects
-    nothing, every later call meets ``BrowserBusyError``, and only a manual kill
-    recovers. Measured live: three consecutive fresh clients attached to the same
-    stranded owner.
+    confirmed keeps the profile lease until its process exits, deliberately. A
+    direct server can be restarted by its supervisor; a detached owner outlives
+    its client, so restarting elects nothing and every later call meets
+    ``BrowserBusyError``. Both server roles must stop serving while holding the
+    profile.
 
     Called from wherever the lease is *kept*, not from wherever the failure is
     reported, and the difference is what the third site turned on: the routine
     close path returns normally, so a handoff, the idle timeout and
-    ``close_session`` strand an owner without raising anything at all.
+    ``close_session`` strand a server without raising anything at all.
 
     *lease* is the object the caller already holds, and passing it is what keeps
     this function off the path-based lookup. That lookup resolves a directory and
@@ -193,7 +192,7 @@ def a_held_profile_means_this_owner_must_go(lease: Any | None = None) -> None:
     """
     global _must_hard_exit
 
-    if process_role() is not ServerRole.OWNER:
+    if process_role() not in (ServerRole.DIRECT, ServerRole.OWNER):
         return
 
     try:

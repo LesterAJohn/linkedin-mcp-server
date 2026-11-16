@@ -229,12 +229,12 @@ class BrowserShutdownUnconfirmedError(LinkedInMCPError):
     the next candidate would all write underneath a Chromium that may still be
     running.
 
-    Raising it also asks a shared owner to stand down, because for that process
-    the message below is not something anyone can act on: it outlives the client
-    that started it, so restarting the client re-attaches to the same held
-    profile. Measured live against a real detached owner, over a teardown that
-    timed out after 10 seconds: three consecutive fresh clients each attached to
-    the same wedged owner and got the same refusal.
+    Raising it asks a browser-driving server to stand down. A direct server can
+    be restarted by its supervisor; a detached owner outlives the client that
+    started it, so restarting the client re-attaches to the same held profile.
+    Measured live against a real detached owner, over a teardown that timed out
+    after 10 seconds: three consecutive fresh clients each attached to the same
+    wedged owner and got the same refusal.
 
     The request lives here rather than at the raise sites because that is what
     makes it complete. It sat at one site once, in ``handle_auth_error``, and the

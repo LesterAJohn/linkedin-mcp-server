@@ -705,6 +705,7 @@ def semantic_program_id(program: str) -> str:
         ("signals.bounded && (signals.easy_apply", "job_apply_ready"),
         ("descriptionHeadings, closedLines", "job_apply_signals"),
         ("const heading = document.querySelector('main h1')", "profile_display_name"),
+        ("const normalize = value => String(value || '')", "inbox_row_summaries"),
         ("main li label[aria-label]", "conversation_thread_refs"),
         ("isScrollable", "scroll_main_region"),
         ("jobs-search-pagination__page-state", "job_total_pages"),

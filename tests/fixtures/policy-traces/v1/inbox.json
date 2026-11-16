@@ -103,6 +103,16 @@
     },
     {
       "arg": {
+        "limit": 10
+      },
+      "call": "get_inbox",
+      "kind": "evaluate",
+      "operation": "inbox_row_summaries",
+      "program_digest": "fce0403f7c6c",
+      "section": "conversation"
+    },
+    {
+      "arg": {
         "selectors": [
           "main"
         ]
@@ -191,6 +201,19 @@
     }
   ],
   "result": {
+    "conversation_counts": {
+      "read": 0,
+      "total": 0,
+      "unknown": 0,
+      "unread": 0
+    },
+    "conversations": [],
+    "inbox_scroll_diagnostics": {
+      "loaded_count": 0,
+      "requested_limit": 10,
+      "scroll_attempts": 1,
+      "stopped_reason": "visible_rows"
+    },
     "section_errors": {
       "inbox": {
         "error_message": "No conversation rows attached within 10 s after requesting https://www.linkedin.com/messaging/compose/, so no click-derived conversation references were produced. This can mean an empty list or a list that was unavailable. Inbox text and any anchor-derived references were read from https://www.linkedin.com/messaging/. Use get_conversation(thread_id=...) with a known thread id to bypass row attribution.",

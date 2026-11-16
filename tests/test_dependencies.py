@@ -1550,7 +1550,7 @@ class TestTheCloseDecidesTheAnswer:
             assert driver.drv._browser_lease is lease
             lease.release()
             assert lease.held, "the profile was freed with Chromium maybe on it"
-            assert (stand_down_reason() is not None) is owner
+            assert stand_down_reason() is not None
 
     @pytest.mark.parametrize("verdict", [True, False], ids=["confirmed", "unconfirmed"])
     async def test_a_new_browser_starts_only_after_a_proven_close(
@@ -1609,7 +1609,7 @@ class TestTheCloseDecidesTheAnswer:
         else:
             assert isinstance(raised.value.__cause__, BrowserShutdownUnconfirmedError)
             assert a.browser_open and driver.drv._browser_lease is a
-            assert (stand_down_reason() is not None) is owner
+            assert stand_down_reason() is not None
         a.release()
 
 

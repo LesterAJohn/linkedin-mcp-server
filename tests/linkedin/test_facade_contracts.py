@@ -68,6 +68,7 @@ TOOL_DELEGATES = {
     "search_posts": "search_posts",
     "send_message": "send_message",
     "reply_to_conversation": "reply_to_conversation",
+    "reply_message": "reply_to_conversation",
 }
 
 
@@ -479,6 +480,7 @@ async def test_facade_send_message_forwards_every_argument(mock_page):
         "Message text",
         confirm_send=False,
         profile_urn="ACoAAB",
+        attachment_paths=None,
     )
 
 

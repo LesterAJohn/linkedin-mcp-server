@@ -1101,6 +1101,8 @@ async def _conversation_scenario(method: str) -> dict[str, Any]:
             "wait_for_selector:conversation_rows",
             PlaywrightTimeoutError("no scripted rows"),
         )
+    if method in {"get_inbox", "search_conversations"}:
+        page.script("evaluate:inbox_row_summaries", [])
     extractor = _extractor(page)
     async with boundaries(recorder, clock):
         with recorder.context(method, "conversation"):
@@ -1214,6 +1216,7 @@ async def _conversation_row_resolution_scenario() -> dict[str, Any]:
     page.script("evaluate:scroll_main_region", True, True)
     page.script("evaluate:root_content", _root("Conversation content"))
     page.script("wait_for_selector:conversation_rows", None)
+    page.script("evaluate:inbox_row_summaries", [])
     page.script("evaluate:conversation_thread_refs", ROW_CLICK_STOPPED_OUTCOME)
     extractor = _extractor(page)
     async with boundaries(recorder, clock):
