@@ -657,6 +657,51 @@ class TestTheClickLoopAgainstRealDom:
             }
         ]
 
+    async def test_snapshot_keeps_later_thread_with_its_own_row(self, dom_page):
+        await serve(
+            dom_page,
+            sidebar(
+                [
+                    ("Select conversation with Ada", "ada"),
+                    ("Select conversation with Grace", "grace"),
+                ],
+                unclickable={"ada"},
+            ),
+        )
+
+        outcome = await scan(dom_page)
+
+        assert outcome.positions == [1]
+        assert outcome.missing_positions == (0,)
+        assert outcome.summaries is not None
+        assert [row["participant"] for row in outcome.summaries] == ["Ada", "Grace"]
+        assert outcome.refs[0]["url"] == "/messaging/thread/grace/"
+
+    async def test_row_changed_after_snapshot_is_not_clicked(self, dom_page):
+        await serve(
+            dom_page,
+            sidebar(
+                [
+                    ("Select conversation with Ada", "ada"),
+                    ("Select conversation with Grace", "grace"),
+                ]
+            ),
+        )
+        await dom_page.evaluate(
+            """() => {
+                const labels = document.querySelectorAll('main li label');
+                labels[0].querySelector('div').addEventListener('click', () => {
+                    labels[1].setAttribute('aria-label', 'Select conversation with Lin');
+                });
+            }"""
+        )
+
+        outcome = await scan(dom_page)
+
+        assert await clicks(dom_page) == ["ada"]
+        assert outcome.positions == [0]
+        assert outcome.missing_positions == (1,)
+
     async def test_the_aria_label_reaches_python_unmodified(self, dom_page):
         """The locale strip is Python's job, so the browser must not do it.
 

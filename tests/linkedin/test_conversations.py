@@ -145,6 +145,9 @@ def _scan(
     first_index_gap: _IndexGap | None = None,
     start_thread_id: str | None = None,
     rows_available: bool = True,
+    summaries: list[dict[str, Any]] | None = None,
+    positions: list[int] | None = None,
+    missing_positions: tuple[int, ...] = (),
 ) -> _ThreadRefScan:
     return _ThreadRefScan(
         refs=list(refs),
@@ -152,6 +155,9 @@ def _scan(
         first_index_gap=first_index_gap,
         start_thread_id=start_thread_id,
         rows_available=rows_available,
+        summaries=summaries,
+        positions=positions,
+        missing_positions=missing_positions,
     )
 
 
@@ -1045,7 +1051,7 @@ class TestGetInbox:
                 reader,
                 "_extract_conversation_thread_refs",
                 new_callable=AsyncMock,
-                return_value=_scan(thread),
+                return_value=_scan(thread, summaries=[conversation], positions=[0]),
             ),
         ):
             result = await reader.get_inbox(limit=10)
@@ -1065,6 +1071,48 @@ class TestGetInbox:
         }
         assert result["references"]["inbox"][0]["has_unread_marker"] is True
         assert result["inbox_scroll_diagnostics"]["loaded_count"] == 1
+
+    async def test_skipped_row_does_not_receive_a_later_thread(self, mock_page):
+        alice = {"participant": "Alice", "read_state": "read"}
+        bob = {"participant": "Bob", "read_state": "read", "preview": "Bob's"}
+        thread = _ref("/messaging/thread/bob/", "Bob", "inbox")
+        scan = _scan(
+            thread, summaries=[alice, bob], positions=[1], missing_positions=(0,)
+        )
+        reader = _reader(mock_page)
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                reader, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                reader,
+                "_extract_inbox_row_summaries",
+                new_callable=AsyncMock,
+                return_value=[{"participant": "Different page", "read_state": "read"}],
+            ),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_root("Inbox text"),
+            ),
+            patch.object(
+                reader,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=scan,
+            ),
+        ):
+            result = await reader.get_inbox(limit=2)
+        assert "thread_id" not in result["conversations"][0]
+        assert result["conversations"][1]["thread_id"] == "bob"
+        assert result["references"]["inbox"][0]["preview"] == "Bob's"
+        assert (
+            result["section_errors"]["inbox"]["error_type"]
+            == "thread_attribution_incomplete"
+        )
 
     async def test_text_is_read_on_the_inbox_and_rows_are_clicked_on_compose(
         self, mock_page, session_boundaries
@@ -1647,6 +1695,39 @@ class TestGetConversation:
 
 
 class TestSearchConversations:
+    async def test_skipped_duplicate_name_does_not_shift_metadata(self, mock_page):
+        reader = _reader(mock_page)
+        ref = _ref("/messaging/thread/second/", "Ada", "search_results")
+        scan = _scan(
+            ref,
+            summaries=[{"preview": "first"}, {"preview": "second"}],
+            positions=[1],
+            missing_positions=(0,),
+        )
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_root("Search results"),
+            ),
+            patch.object(
+                reader,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=scan,
+            ),
+        ):
+            result = await reader.search_conversations("Ada")
+
+        assert result["references"]["search_results"][0]["preview"] == "second"
+        assert (
+            result["section_errors"]["search_results"]["error_type"]
+            == "thread_attribution_incomplete"
+        )
+
     async def test_returns_search_results(self, mock_page):
         reader = _reader(mock_page)
         nav_mock = AsyncMock()

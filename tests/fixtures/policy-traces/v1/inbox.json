@@ -108,7 +108,7 @@
       "call": "get_inbox",
       "kind": "evaluate",
       "operation": "inbox_row_summaries",
-      "program_digest": "fce0403f7c6c",
+      "program_digest": "900915049073",
       "section": "conversation"
     },
     {

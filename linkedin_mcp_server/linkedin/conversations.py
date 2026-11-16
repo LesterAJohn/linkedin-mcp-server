@@ -65,6 +65,39 @@ def strip_select_conversation_prefix(aria_label: str) -> str:
 # docs/decisions/2026-09-25-fail-closed-thread-attribution.md.
 _COMPOSE_URL = "https://www.linkedin.com/messaging/compose/"
 
+_ROW_SUMMARY_JS = r"""label => {
+    const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const row = label.closest('li');
+    const ariaLabel = normalize(label.getAttribute('aria-label'));
+    const participant = ariaLabel.replace(/^Select conversation with\s+/i, '').trim();
+    const rowText = normalize(row.innerText || '');
+    const lines = [...new Set(
+        String(row.innerText || '').split(/\n+/).map(normalize)
+    )].filter(Boolean);
+    const lastActivity = normalize(row.querySelector('time, [datetime]')?.textContent);
+    const preview = lines.find(line =>
+        line !== ariaLabel && line !== participant && line !== lastActivity
+    ) || '';
+    const unread = Boolean(row.querySelector('[data-test-unread]'));
+    const active = Boolean(
+        row.matches('[aria-current="page"], [aria-selected="true"]') ||
+        row.querySelector(
+            '[aria-current="page"], [aria-selected="true"], input:checked, [checked]'
+        )
+    );
+    return {
+        participant,
+        aria_label: ariaLabel,
+        row_text: rowText,
+        last_activity: lastActivity,
+        preview,
+        active,
+        has_unread_marker: unread,
+        read_state_confidence: unread ? 'high' : 'low',
+        read_state: unread ? 'unread' : 'read',
+    };
+}"""
+
 _SCAN_STARTED_ON_THREAD = (
     " The scan began on a thread path. An unchanged pre-click thread ID was"
     " not accepted as evidence for a row."
@@ -114,6 +147,9 @@ class _ThreadRefScan:
     first_index_gap: _IndexGap | None = None
     start_thread_id: str | None = None
     rows_available: bool = True
+    summaries: list[dict[str, Any]] | None = None
+    positions: list[int] | None = None
+    missing_positions: tuple[int, ...] = ()
 
 
 _BarrierReason = Literal["navigation", "missing_target", "name_rejected"]
@@ -184,6 +220,16 @@ def _listing_section_errors(
         return {section: _thread_attribution_stopped_error(scan)}
     if report_unavailable_rows and not scan.rows_available:
         return {section: _conversation_rows_unavailable_error()}
+    if scan.missing_positions:
+        return {
+            section: {
+                "error_type": "thread_attribution_incomplete",
+                "error_message": (
+                    "Some conversation rows changed or had no click target; "
+                    "their thread IDs could not be verified." + _BYPASS_ROW_ATTRIBUTION
+                ),
+            }
+        }
     return None
 
 
@@ -782,6 +828,9 @@ class ConversationReader:
         # known locale prefix to derive a clean participant name for refs.
         outcome: dict[str, Any] = await self._session.run_on_linkedin(
             """async ({ limit, nameFilter }) => {
+                const summarize = """
+            + _ROW_SUMMARY_JS
+            + """;
                 const labels = Array.from(document.querySelectorAll(
                     'main li label[aria-label]'
                 ));
@@ -812,6 +861,8 @@ class ConversationReader:
                 };
                 const outcome = {
                     rows: [],
+                    summaries: labels.slice(0, cap).map(summarize),
+                    missingPositions: [],
                     stoppedAt: null,
                     firstIndexGap: null,
                     startThreadId: idOf(),
@@ -823,9 +874,18 @@ class ConversationReader:
                         .replace(/^Select conversation with\\s+/i, '')
                         .replace(/\\s+/g, ' ').trim().toLowerCase();
                     if (wanted && rowName !== wanted) continue;
+                    const snapshot = outcome.summaries[position];
+                    const current = label.isConnected ? summarize(label) : null;
+                    if (!wanted && (!current ||
+                        ['aria_label', 'row_text', 'last_activity', 'preview']
+                            .some(key => current[key] !== snapshot[key]))) {
+                        outcome.missingPositions.push(position);
+                        continue;
+                    }
                     const clickTarget = label.closest('li')
                         ?.querySelector('div[class*="listitem__link"]');
                     if (!clickTarget) {
+                        outcome.missingPositions.push(position);
                         // Skipped, not clicked. A listing loses only this
                         // row; a username index cannot count past it.
                         if (wanted && outcome.firstIndexGap === null) {
@@ -861,7 +921,7 @@ class ConversationReader:
                         outcome.stoppedAt = { ariaLabel, position };
                         break;
                     }
-                    outcome.rows.push({ ariaLabel, threadId: after });
+                    outcome.rows.push({ ariaLabel, threadId: after, position });
                 }
                 return outcome;
             }""",
@@ -882,6 +942,14 @@ class ConversationReader:
         gap = outcome["firstIndexGap"]
         return _ThreadRefScan(
             refs=refs,
+            summaries=outcome.get("summaries"),
+            missing_positions=tuple(outcome.get("missingPositions", ())),
+            positions=(
+                [row["position"] for row in outcome["rows"]]
+                if outcome.get("summaries") is not None
+                and all("position" in row for row in outcome["rows"])
+                else None
+            ),
             stopped_at=(
                 None
                 if stopped is None
@@ -1057,23 +1125,9 @@ class ConversationReader:
         scan = await self._extract_conversation_thread_refs(
             limit=limit, context="inbox", scroll_attempts=scrolls
         )
-        for index, ref in enumerate(scan.refs):
-            if index >= len(conversations):
-                break
-            conversation = conversations[index]
-            thread_id = ref["url"].rstrip("/").rsplit("/", 1)[-1]
-            conversation["thread_id"] = thread_id
-            conversation["thread_url"] = ref["url"]
-            for key in (
-                "last_activity",
-                "preview",
-                "active",
-                "has_unread_marker",
-                "row_text",
-                "read_state_confidence",
-            ):
-                if key in conversation:
-                    ref[key] = conversation[key]
+        if scan.summaries is not None and scan.positions is not None:
+            conversations = scan.summaries
+            self._attach_scanned_metadata(scan, include_thread=True)
         if scan.refs:
             references = dedupe_references(scan.refs + references)
 
@@ -1109,54 +1163,37 @@ class ConversationReader:
         """Read visible inbox row metadata before any row is opened."""
         rows: list[dict[str, Any]] = await self._session.page.evaluate(
             r"""({ limit }) => {
-                const normalize = value => String(value || '')
-                    .replace(/\s+/g, ' ').trim();
+                const summarize = """
+            + _ROW_SUMMARY_JS
+            + r""";
                 const labels = Array.from(document.querySelectorAll(
                     'main li label[aria-label]'
                 )).slice(0, limit);
-                return labels.map(label => {
-                    const row = label.closest('li');
-                    if (!row) return null;
-                    const ariaLabel = normalize(label.getAttribute('aria-label'));
-                    const participant = ariaLabel.replace(
-                        /^Select conversation with\s+/i, ''
-                    ).trim();
-                    const rowText = normalize(row.innerText || '');
-                    const lines = [...new Set(
-                        String(row.innerText || '').split(/\n+/).map(normalize)
-                    )].filter(Boolean);
-                    const lastActivity = normalize(
-                        row.querySelector('time, [datetime]')?.textContent
-                    );
-                    const preview = lines.find(line =>
-                        line !== ariaLabel &&
-                        line !== participant &&
-                        line !== lastActivity
-                    ) || '';
-                    const unread = Boolean(row.querySelector('[data-test-unread]'));
-                    const readState = unread ? 'unread' : 'read';
-                    const active = Boolean(
-                        row.matches('[aria-current="page"], [aria-selected="true"]') ||
-                        row.querySelector(
-                            '[aria-current="page"], [aria-selected="true"], input:checked, [checked]'
-                        )
-                    );
-                    return {
-                        participant,
-                        aria_label: ariaLabel,
-                        row_text: rowText,
-                        last_activity: lastActivity,
-                        preview,
-                        active,
-                        has_unread_marker: unread,
-                        read_state_confidence: unread ? 'high' : 'low',
-                        read_state: readState,
-                    };
-                }).filter(Boolean);
+                return labels.map(summarize);
             }""",
             {"limit": limit},
         )
         return [row for row in rows if isinstance(row, dict)]
+
+    @staticmethod
+    def _attach_scanned_metadata(scan: _ThreadRefScan, *, include_thread: bool) -> None:
+        if scan.summaries is None or scan.positions is None:
+            return
+        for ref, position in zip(scan.refs, scan.positions, strict=True):
+            conversation = scan.summaries[position]
+            if include_thread:
+                conversation["thread_id"] = ref["url"].rstrip("/").rsplit("/", 1)[-1]
+                conversation["thread_url"] = ref["url"]
+            for key in (
+                "last_activity",
+                "preview",
+                "active",
+                "has_unread_marker",
+                "row_text",
+                "read_state_confidence",
+            ):
+                if key in conversation:
+                    ref[key] = conversation[key]
 
     async def get_conversation(
         self,
@@ -1242,8 +1279,6 @@ class ConversationReader:
         await self._session.check_rate_limit()
         await self._session.dismiss_modal()
         await self._wait_for_main_text(log_context="Messaging search")
-        conversations = await self._extract_inbox_row_summaries(limit)
-
         raw_result = await self._content._extract_root_content(["main"])
         raw = raw_result["text"]
         cleaned = strip_linkedin_noise(raw) if raw else ""
@@ -1260,20 +1295,7 @@ class ConversationReader:
         scan = await self._extract_conversation_thread_refs(
             limit=limit, context="search_results"
         )
-        for index, ref in enumerate(scan.refs):
-            if index >= len(conversations):
-                break
-            conversation = conversations[index]
-            for key in (
-                "last_activity",
-                "preview",
-                "active",
-                "has_unread_marker",
-                "row_text",
-                "read_state_confidence",
-            ):
-                if key in conversation:
-                    ref[key] = conversation[key]
+        self._attach_scanned_metadata(scan, include_thread=False)
         if scan.refs:
             references = dedupe_references(scan.refs + references)
 

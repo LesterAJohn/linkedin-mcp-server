@@ -22,11 +22,22 @@ from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
 from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.profile_lease import get_profile_lease
 from linkedin_mcp_server.remote_tools import is_remote
+from linkedin_mcp_server.server_role import ServerRole, process_role, stand_down_reason
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.daemon.discovery import Unanswered
 
 logger = logging.getLogger(__name__)
+
+
+def _refuse_standing_down_direct_server() -> None:
+    if process_role() is ServerRole.DIRECT and stand_down_reason() is not None:
+        reason = BrowserBusyError(
+            "This server cannot safely use its browser profile and must be "
+            "restarted before running this tool."
+        )
+        raise CodedToolError(str(reason), ErrorCode.BROWSER_BUSY) from reason
+
 
 #: Tools that read only local state and never touch the browser. They skip the
 #: lock and the profile lease, so they answer while another call holds the
@@ -93,6 +104,7 @@ class SequentialToolExecutionMiddleware(Middleware):
         )
 
         async with self._lock:
+            _refuse_standing_down_direct_server()
             wait_seconds = time.perf_counter() - wait_started
             logger.debug(
                 "Acquired browser lock for tool '%s' after %.3fs",
@@ -158,6 +170,11 @@ class SequentialToolExecutionMiddleware(Middleware):
             raise CodedToolError(
                 str(BrowserBusyError(self._busy_because())), ErrorCode.BROWSER_BUSY
             )
+        try:
+            _refuse_standing_down_direct_server()
+        except CodedToolError:
+            lease.release()
+            raise
         # For good: the startup observation no longer describes the holder.
         self._silent_owner = None
 

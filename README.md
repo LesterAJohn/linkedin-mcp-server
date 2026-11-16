@@ -121,6 +121,11 @@ workflow.
 
 Messaging conversation references returned by `get_inbox` and `search_conversations` now include row-level metadata captured from the inbox sidebar: `last_activity`, `preview`, `active`, `has_unread_marker`, `row_text`, and `read_state_confidence`. `get_inbox` also returns `inbox_scroll_diagnostics` so workflow summaries can show how many rows were loaded across non-click scroll passes before thread-reference resolution.
 
+Inbox conversation summaries and their thread IDs come from the compose-page
+sidebar snapshot taken before the scan clicks rows; the inbox text still comes
+from the ordinary inbox page. If a row changes or cannot be clicked, its thread
+ID is omitted and `section_errors` reports incomplete attribution.
+
 `reply_message` is the safest write path when you must stay in an existing conversation. It requires a `thread_id` and opens `/messaging/thread/<thread_id>/` directly. If LinkedIn redirects to a different thread or opens recipient selection instead of the requested thread, the tool fails closed with `thread_mismatch` and does not send.
 
 After a confirmed send, `reply_message` and `send_message` verify success by finding the outbound text in a visible conversation item outside the editable composer. Draft text left in the composer is not treated as send confirmation, so automation fails closed instead of reporting a false successful send.

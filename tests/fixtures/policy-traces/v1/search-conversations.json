@@ -87,16 +87,6 @@
     },
     {
       "arg": {
-        "limit": 10
-      },
-      "call": "search_conversations",
-      "kind": "evaluate",
-      "operation": "inbox_row_summaries",
-      "program_digest": "fce0403f7c6c",
-      "section": "conversation"
-    },
-    {
-      "arg": {
         "selectors": [
           "main"
         ]

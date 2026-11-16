@@ -11,6 +11,7 @@ import mcp.types as mt
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.server.middleware import MiddlewareContext
+from fastmcp.tools import ToolResult
 
 import linkedin_mcp_server.server as server_module
 from linkedin_mcp_server import __version__
@@ -910,6 +911,121 @@ class TestOwnerAuthentication:
 
 
 class TestSequentialToolExecutionMiddleware:
+    async def test_in_flight_call_can_answer_after_direct_stand_down(self, monkeypatch):
+        import linkedin_mcp_server.sequential_tool_middleware as serial
+
+        middleware = SequentialToolExecutionMiddleware()
+        monkeypatch.setattr(serial, "process_role", lambda: ServerRole.DIRECT)
+        reason = None
+        monkeypatch.setattr(serial, "stand_down_reason", lambda: reason)
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(name="slow_tool", arguments={}),
+            method="tools/call",
+        )
+        started = asyncio.Event()
+        resume = asyncio.Event()
+
+        async def run_tool(
+            context: MiddlewareContext[mt.CallToolRequestParams],
+        ) -> ToolResult:
+            started.set()
+            await resume.wait()
+            return ToolResult(content=[mt.TextContent(type="text", text="finished")])
+
+        task = asyncio.create_task(middleware.on_call_tool(context, run_tool))
+        await started.wait()
+        reason = "profile is held"
+        resume.set()
+        assert (await task).content == [mt.TextContent(type="text", text="finished")]
+
+    async def test_direct_gate_does_not_change_owner_or_proxy_roles(self, monkeypatch):
+        import linkedin_mcp_server.sequential_tool_middleware as serial
+
+        monkeypatch.setattr(serial, "stand_down_reason", lambda: "profile is held")
+        for role in (ServerRole.OWNER, ServerRole.PROXY):
+            monkeypatch.setattr(serial, "process_role", lambda: role)
+            serial._refuse_standing_down_direct_server()
+
+    async def test_direct_stand_down_refuses_a_queued_browser_call(self, monkeypatch):
+        import linkedin_mcp_server.sequential_tool_middleware as serial
+        from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
+
+        middleware = SequentialToolExecutionMiddleware()
+        monkeypatch.setattr(serial, "process_role", lambda: ServerRole.DIRECT)
+        reason = None
+        monkeypatch.setattr(serial, "stand_down_reason", lambda: reason)
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(name="slow_tool", arguments={}),
+            method="tools/call",
+        )
+        call_next = AsyncMock()
+        await middleware._lock.acquire()
+        queued = asyncio.create_task(middleware.on_call_tool(context, call_next))
+        await asyncio.sleep(0)
+        reason = "profile is held"
+        middleware._lock.release()
+
+        with pytest.raises(CodedToolError) as error:
+            await queued
+        assert error.value.code == ErrorCode.BROWSER_BUSY
+        call_next.assert_not_awaited()
+
+    async def test_stand_down_while_waiting_for_profile_releases_the_lease(
+        self, monkeypatch
+    ):
+        import linkedin_mcp_server.sequential_tool_middleware as serial
+        from linkedin_mcp_server.error_handler import CodedToolError
+
+        reason = None
+        monkeypatch.setattr(serial, "process_role", lambda: ServerRole.DIRECT)
+        monkeypatch.setattr(serial, "stand_down_reason", lambda: reason)
+        waiting = asyncio.Event()
+        resume = asyncio.Event()
+        lease = MagicMock()
+        lease.try_acquire.return_value = False
+
+        async def acquire(*, timeout):
+            waiting.set()
+            await resume.wait()
+            return True
+
+        lease.acquire = acquire
+        monkeypatch.setattr(serial, "get_profile_lease", lambda: lease)
+        middleware = SequentialToolExecutionMiddleware()
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(name="slow_tool", arguments={}),
+            method="tools/call",
+        )
+        call_next = AsyncMock()
+        task = asyncio.create_task(middleware.on_call_tool(context, call_next))
+        await waiting.wait()
+        reason = "profile is held"
+        resume.set()
+
+        with pytest.raises(CodedToolError, match="must be restarted"):
+            await task
+        lease.release.assert_called_once_with()
+        call_next.assert_not_awaited()
+
+    async def test_direct_stand_down_does_not_block_browserless_tools(
+        self, monkeypatch
+    ):
+        import linkedin_mcp_server.sequential_tool_middleware as serial
+
+        monkeypatch.setattr(serial, "process_role", lambda: ServerRole.DIRECT)
+        monkeypatch.setattr(serial, "stand_down_reason", lambda: "profile is held")
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(name="get_session_status", arguments={}),
+            method="tools/call",
+        )
+        result = MagicMock()
+        call_next = AsyncMock(return_value=result)
+
+        assert (
+            await SequentialToolExecutionMiddleware().on_call_tool(context, call_next)
+            is result
+        )
+
     async def test_create_mcp_server_registers_sequential_tool_middleware(self):
         mcp = create_mcp_server()
 

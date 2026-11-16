@@ -1101,7 +1101,7 @@ async def _conversation_scenario(method: str) -> dict[str, Any]:
             "wait_for_selector:conversation_rows",
             PlaywrightTimeoutError("no scripted rows"),
         )
-    if method in {"get_inbox", "search_conversations"}:
+    if method == "get_inbox":
         page.script("evaluate:inbox_row_summaries", [])
     extractor = _extractor(page)
     async with boundaries(recorder, clock):
