@@ -112,6 +112,30 @@ Linux is less a gap than a different answer: under a virtual display nobody is
 looking at the screen, so an ordinary window is already invisible and there is
 nothing to hide.
 
+### Docker login viewer
+
+The Openbox, x11vnc and noVNC candidate passed the G4 interaction check on both
+published architectures. Measurements were stable before connection, after
+connection, after a trusted click, and after disconnect:
+
+| | amd64 | arm64 |
+|---|---|---|
+| Focus / visibility | `true` / `visible` | `true` / `visible` |
+| Screen | 1920x1080 | 1920x1080 |
+| Outer window | 945x1060 | 945x1060 |
+| Inner height | 969 | 913 |
+| Device pixel ratio | 1 | 1 |
+| Chromium active | yes | yes |
+| Trusted click reached page | yes | yes |
+
+The client scales the fixed framebuffer locally. x11vnc remote resize remains
+disabled, so connecting cannot change Chromium's reported screen. The package
+closure adds 107.2 MiB to Docker's image-inspect content size on amd64 and
+102.8 MiB on arm64. The uncompressed new layer shown by `docker history` is
+383 MB on amd64 and 362 MB on arm64. Those metrics describe different things
+and should not be compared as though the history layer were the downloadable
+image delta.
+
 ### Docker WebGL on the virtual display
 
 Measured in the candidate image on Linux amd64 and arm64, ten cold browser
@@ -246,6 +270,114 @@ to carry over.
 either, because it is implied rather than skipped: the windowless path fails
 closed, so a run that produced these values had a hidden target and no window.
 That is an inference, not a CoreGraphics poll like the 148 row was.
+
+### Re-measured on Chrome for Testing 153
+
+Patchright 1.63.0 moves the lock to revision 1243, Chrome for Testing
+153.0.8010.12, and it is the first release that downloads Chrome for Testing
+for Linux arm64 as well. So the arm64 image changed product and not only
+version: `--version` there read `Chromium 149.0.7827.0` at 1.61.2 and reads
+`Google Chrome for Testing 153.0.8010.12` now, the same string as the amd64
+image and macOS. Each row below was measured against the same probe on the
+149 build, on the same machine, as a control. Measured 2026-09-26 on macOS
+26.6.2 arm64 with Docker 29.4.0.
+
+macOS, through `BrowserManager` against a loopback origin, both launch modes.
+`tests/test_browser_identity.py` passes all 35 cases on 153.
+
+| | Value on 153 |
+|---|---|
+| User agent | `…Chrome/153.0.0.0…`, no `HeadlessChrome` |
+| `sec-ch-ua` brands | `Chromium/153`, `Not_A Brand/8`, major agreeing with the UA |
+| High-entropy hints | `arm`, `64`, two `fullVersionList` entries |
+| `navigator.webdriver` | `false` |
+| `document.visibilityState` / `hasFocus()` | `visible` / `true` |
+| Outer window vs screen | default 1280x720 on 1280x720; headed 1200x926 on 1920x1080 |
+| `navigator.plugins.length` / `window.chrome` | 5 / `object` |
+| `Notification.permission` | `default` |
+| `requestAnimationFrame` | 61/s in the default mode and 61/s headed |
+| CreepJS headless / like headless / stealth | default 0% / 44% / 0%; headed 0% / 31% / 0% |
+
+The frame rate is the display's, not the browser's: 149 measured 61/s in both
+modes on the same 60 Hz screen, where the 148 and 149 rows above read 122/s.
+What the row has to show is that the hidden target runs at the rate of an
+ordinary window, and it does. The CreepJS scores and their hashes are identical
+on 149 and 153 in both modes.
+
+The published images, headed under Xvfb as they run, with the harness from
+`tests/browser_identity_harness.py` inside the container. The arm64 image was
+measured natively, the amd64 one under emulation; the 149 control is the
+published `latest` image.
+
+| | arm64 | amd64 |
+|---|---|---|
+| Product | `Google Chrome for Testing 153.0.8010.12` | same |
+| Page, workers and cross-origin frame agree, headers included | yes | yes |
+| `sec-ch-ua` / `sec-ch-ua-arch` | `"Chromium";v="153", "Not_A Brand";v="8"` / `arm` | same / `x86` |
+| `navigator.webdriver` / automation globals | `false` / none | `false` / none |
+| `outer <= screen` | 945x1060 on 1920x1080 | same |
+| WebGL1 / WebGL2, ten launches | 10/10 / 10/10 | 10/10 / 10/10 |
+| Unmasked renderer | `ANGLE (Mesa/X.org, llvmpipe (LLVM 15.0.6 128 bits), OpenGL 4.5)` | same, byte-identical |
+| SwiftShader | absent | absent |
+
+Every arm64 value matches the 149 image except the version and the GREASE
+brand. `requestAnimationFrame` under Xvfb was noisy on both: 153 read 43, 44,
+56 and 54 across four launches, 149 read 54, 54, 55 and 54. Two slow launches
+out of four is not a trend, and it is recorded rather than explained.
+
+The downgrade guard asks the running binary for its product, so the arm64
+rename reaches it directly. Inside the new arm64 image it parsed `Google Chrome
+for Testing` as comparable, opened a profile marked `149.0.7827.0` and refused
+one marked `160.0.1.0`.
+
+Not re-measured on 153: fpscanner, rebrowser-bot-detector, the JA4 and HTTP/2
+fingerprints, the startup-flash timing, and the cookie-across-restart check.
+
+### Re-measured on Chrome for Testing 156
+
+Patchright 1.64.4 moves the lock to revision 1248, Chrome for Testing
+156.0.8078.4, and ffmpeg from revision 1011 to 1013. winldd stays at 1007. The
+driver it bundles reports itself as 1.64.3. Its chromium download and
+executable tables are the same as at 1.63.0, so every platform still fetches
+Chrome for Testing, and `--version` on macOS arm64 reads `Google Chrome for
+Testing 156.0.8078.4`. Each row below was measured against the same probe on
+the 153 build, on the same machine, as a control. Measured 2026-11-13 on macOS
+27.2 arm64 with a 1920x1080 60 Hz display.
+
+macOS, through `BrowserManager` against a loopback origin, both launch modes.
+`tests/test_browser_identity.py` passes all 35 cases on 156, and on 153 in the
+same session.
+
+| | Value on 156 |
+|---|---|
+| User agent | `…Chrome/156.0.0.0…`, no `HeadlessChrome` |
+| `sec-ch-ua` brands | `Not:A-Brand/8`, `Chromium/156`, major agreeing with the UA |
+| High-entropy hints | `arm`, `64`, two `fullVersionList` entries |
+| `navigator.webdriver` | `false` |
+| `document.visibilityState` / `hasFocus()` | `visible` / `true` |
+| Outer window vs screen | default 1280x720 on 1280x720; headed 1200x907 on 1920x1080 |
+| `navigator.plugins.length` / `window.chrome` | 5 / `object` |
+| `Notification.permission` | `default` |
+| `requestAnimationFrame` | 60/s in the default mode and 61/s headed |
+| CreepJS headless / like headless / stealth | default 0% / 44% / 0%; headed 0% / 31% / 0% |
+
+Every row matches the 153 control except the version and the GREASE brand,
+which moved from `Not_A Brand` in second place to `Not:A-Brand` in first. The
+153 control read 1200x907 headed as well, so the 926 in the 153 table follows
+the machine, not the build. The control's frame rate was 58/s and 60/s. The
+CreepJS scores, the flagged like-headless keys and the headless hash are
+identical on 153 and 156 in both modes.
+
+The downgrade guard parses the 156 binary as comparable. It opened profiles
+marked `153.0.8010.12` and `156.0.8078.4` and refused one marked `999.0.1.0`.
+A fresh profile opened once by 156 through `BrowserManager` records
+`156.0.8078.4`, and the guard refuses the 153 binary on it, so a return to
+patchright 1.63.0 after a run on 1.64.4 stops at the guard.
+
+Not re-measured on 156: the published images, Windows, fpscanner,
+rebrowser-bot-detector, the JA4 and HTTP/2 fingerprints, the startup-flash
+timing, and the cookie-across-restart check. The image rows in the 153 table
+stay 153 measurements.
 
 ## Things that look like fixes and are not
 

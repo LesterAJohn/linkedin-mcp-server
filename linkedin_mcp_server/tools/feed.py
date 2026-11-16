@@ -1,5 +1,5 @@
 """
-LinkedIn feed scraping tool.
+LinkedIn feed reading tool.
 
 Fetches posts from the authenticated user's LinkedIn home feed using
 innerText extraction. Scrolls until the requested number of post
@@ -15,14 +15,10 @@ from fastmcp import Context, FastMCP
 from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
-from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scraping.extractor import (
-    _RATE_LIMITED_MSG,
-    rate_limited_section_error,
-)
-from linkedin_mcp_server.scraping.link_metadata import Reference
+from linkedin_mcp_server.dependencies import get_ready_extractor, tool_errors
+from linkedin_mcp_server.linkedin.contracts import RATE_LIMITED_SECTION_TEXT
+from linkedin_mcp_server.linkedin.contracts import rate_limited_section_error
+from linkedin_mcp_server.linkedin.link_metadata import Reference
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +32,12 @@ def register_feed_tools(
         timeout=tool_timeout,
         title="Get Feed",
         annotations={"readOnlyHint": True, "openWorldHint": True},
-        tags={"feed", "scraping"},
-        exclude_args=["extractor"],
+        tags={"feed"},
     )
+    @tool_errors
     async def get_feed(
         ctx: Context,
         num_posts: Annotated[int, Field(ge=1, le=50)] = 10,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Get posts from the authenticated user's LinkedIn feed.
@@ -74,7 +69,9 @@ def register_feed_tools(
               entries. URLs are relative paths and may carry either
               ``/feed/update/<urn>/`` (DOM-anchor-derived) or
               ``/posts/<slug>`` (SDUI-derived) shape — both are valid
-              LinkedIn permalinks.
+              LinkedIn permalinks. An entry paired with a rendered post
+              carries that post's URN as ``value`` and may carry ``text``
+              (an excerpt of the post).
             - section_errors: present when the feed is rate-limited or
               extraction fails.
 
@@ -83,44 +80,33 @@ def register_feed_tools(
             should parse sections["feed"] for post bodies.
 
         """
-        try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_feed"
-            )
-            logger.info("Scraping feed (num_posts=%d)", num_posts)
+        extractor = await get_ready_extractor(ctx, tool_name="get_feed")
+        logger.info("Reading feed (num_posts=%d)", num_posts)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Starting feed scrape"
-            )
+        await ctx.report_progress(
+            progress=0, total=100, message="Reading the home feed"
+        )
 
-            extracted = await extractor.extract_feed(num_posts=num_posts)
+        extracted = await extractor.extract_feed(num_posts=num_posts)
 
-            url = "https://www.linkedin.com/feed/"
-            sections: dict[str, str] = {}
-            references: dict[str, list[Reference]] = {}
-            section_errors: dict[str, dict[str, Any]] = {}
-            if extracted.text and extracted.text != _RATE_LIMITED_MSG:
-                sections["feed"] = extracted.text
-                if extracted.references:
-                    references["feed"] = extracted.references
-            elif extracted.text == _RATE_LIMITED_MSG:
-                section_errors["feed"] = rate_limited_section_error()
-            elif extracted.error:
-                section_errors["feed"] = extracted.error
+        url = "https://www.linkedin.com/feed/"
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+        if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
+            sections["feed"] = extracted.text
+            if extracted.references:
+                references["feed"] = extracted.references
+        elif extracted.text == RATE_LIMITED_SECTION_TEXT:
+            section_errors["feed"] = rate_limited_section_error()
+        elif extracted.error:
+            section_errors["feed"] = extracted.error
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            result: dict[str, Any] = {"url": url, "sections": sections}
-            if references:
-                result["references"] = references
-            if section_errors:
-                result["section_errors"] = section_errors
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "get_feed")
-        except Exception as e:
-            raise_tool_error(e, "get_feed")
+        result: dict[str, Any] = {"url": url, "sections": sections}
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result

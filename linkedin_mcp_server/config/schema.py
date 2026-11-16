@@ -18,14 +18,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_TOOL_TIMEOUT_SECONDS: float = 180.0
 DEFAULT_LOGIN_TIMEOUT_SECONDS: float = 1800.0  # 30 min; 0 = no limit
 DEFAULT_LOGIN_INLINE_WAIT_SECONDS: float = 25.0  # bounded inline wait
-# Clamp ceiling: scrape time stacks on top of the inline wait inside one tool
+# Clamp ceiling: page reading time stacks on top of the inline wait inside one tool
 # call and the smallest MCP client timeout is ~60s, so the wait alone must stay
 # well under that floor.
 MAX_LOGIN_INLINE_WAIT_SECONDS: float = 45.0
 
 # How long a tool call waits for another process to hand over the browser. Same
 # budget and ceiling as the login inline wait, for the same reason: the wait is
-# spent inside one tool call, ahead of the scrape itself.
+# spent inside one tool call, ahead of the page read itself.
 DEFAULT_BROWSER_WAIT_SECONDS: float = 25.0
 MAX_BROWSER_WAIT_SECONDS: float = 45.0
 # Shortest time an owner keeps the browser before honouring a handoff request.
@@ -53,7 +53,8 @@ BROWSER_HANDOFF_MARGIN_SECONDS: float = 3.0
 PROFILE_HANDOVER_WAIT_SECONDS: float = 60.0
 
 # What fraction of a tool call a frontend may spend waiting for the sign-in it
-# started, before answering without it.
+# started, before answering without it. The fraction is of the call's whole
+# budget (``daemon.proxy.call_budget``), counted from the call's arrival.
 #
 # A fraction rather than a number of seconds, because the bound that matters is
 # the call this wait is spent inside, and ``tool_timeout_seconds`` is something
@@ -135,13 +136,6 @@ class BrowserConfig:
 
     headless: bool = True
     slow_mo: int = 0  # Milliseconds between browser actions (debugging)
-    # Always None: the override was removed and both settings that used to fill
-    # this are now refused at startup. The field stays because
-    # ``SHARED_CONFIG_FIELDS`` hashes it into the daemon's configuration
-    # fingerprint, and dropping a field there makes a running owner unreadable
-    # to a client of the other version instead of merely mismatched. Remove it
-    # once owner turnover survives a fingerprint change.
-    user_agent: str | None = None
     viewport_width: int = 1280
     viewport_height: int = 720
     default_timeout: int = 5000  # Milliseconds for page operations
@@ -183,17 +177,9 @@ class BrowserConfig:
     # user's keychain and degrades to manual login, and no cookie crosses the
     # network.
     auto_import_from_browser: bool | None = None
-    # Read by nothing, and accepted anyway. It used to choose between installing
-    # the full browser up front or lazily on the first headed login; there is
-    # only one browser now, so both answers describe the same install.
-    #
-    # It stays for the same reason ``user_agent`` above does: it is part of the
-    # daemon's configuration fingerprint (``SHARED_CONFIG_FIELDS``), and
-    # ``daemon.py`` rejects a fingerprint mismatch *before* it compares package
-    # versions. Drop the field and a running owner of the other version stops
-    # being readable, so it can never be asked to stand down. Both can go once
-    # owner turnover survives a fingerprint change.
-    eager_full_chromium: bool = False
+    # Temporary directory parent used during browser installation bootstrap.
+    # Defaults to system tempdir (tempfile.gettempdir()) when None.
+    installer_temp_dir: str | None = None
 
     def validate(self) -> None:
         """Validate browser configuration values."""
@@ -228,11 +214,11 @@ class BrowserConfig:
                 f"got {self.login_inline_wait_seconds}"
             )
         # Clamp (do not reject) so a misconfigured large value can never alone
-        # approach the client timeout floor once scrape time is added on top.
+        # approach the client timeout floor once page reading time is added on top.
         if self.login_inline_wait_seconds > MAX_LOGIN_INLINE_WAIT_SECONDS:
             logger.warning(
                 "login_inline_wait_seconds %.1f exceeds the %.1fs ceiling; "
-                "clamping (scrape time stacks on top of the wait inside one "
+                "clamping (page reading time stacks on top of the wait inside one "
                 "tool call).",
                 self.login_inline_wait_seconds,
                 MAX_LOGIN_INLINE_WAIT_SECONDS,
@@ -249,7 +235,7 @@ class BrowserConfig:
                     f"{name} must be a non-negative finite number, got {value}"
                 )
         # Clamped for the same reason as the login inline wait: the wait happens
-        # inside a tool call, ahead of the scrape.
+        # inside a tool call, ahead of the page read.
         if self.browser_wait_seconds > MAX_BROWSER_WAIT_SECONDS:
             logger.warning(
                 "browser_wait_seconds %.1f exceeds the %.1fs ceiling; clamping.",
@@ -390,7 +376,7 @@ class BrowserConfig:
         """Build the Patchright ``proxy`` option, or None when unconfigured.
 
         Both browser launch paths call this so the login session and the
-        scraping session leave from the same address. A session created on one
+        page-reading session leave from the same address. A session created on one
         IP and used from another is what trips LinkedIn's security checkpoint.
         """
         if not self.proxy_server:
@@ -416,6 +402,10 @@ class ServerConfig:
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "WARNING"
     user_id: str | None = None
     login: bool = False
+    # Expose the Docker login browser through a short-lived authenticated noVNC
+    # endpoint. CLI-only: there is deliberately no environment switch that could
+    # expose browser control on an ordinary container startup.
+    login_viewer: bool = False
     status: bool = False  # Check session validity and exit
     logout: bool = False
     # Take over a USER_DATA_DIR that is neither the default nor already ours.
@@ -433,7 +423,7 @@ class ServerConfig:
     # Serve every stdio client from one browser-owning process instead of
     # giving each its own. Off while the supervision and liveness work is
     # unfinished: an owner that outlives its client must be provably unable to
-    # keep scraping, and until then this stays something you opt into. Only
+    # keep reading LinkedIn, and until then this stays something you opt into. Only
     # applies to stdio; an explicit HTTP bind is already a single server.
     daemon_enabled: bool = False
 
@@ -445,6 +435,20 @@ class ServerConfig:
             raise ConfigurationError(
                 f"tool_timeout_seconds must be a positive finite number, got {self.tool_timeout_seconds}"
             )
+        if self.login_viewer:
+            if not self.login:
+                raise ConfigurationError("--login-viewer requires --login")
+            incompatible = []
+            if self.status:
+                incompatible.append("--status")
+            if self.logout:
+                incompatible.append("--logout")
+            if self.import_from_browser is not None:
+                incompatible.append("--import-from-browser")
+            if incompatible:
+                raise ConfigurationError(
+                    "--login-viewer cannot be combined with " + ", ".join(incompatible)
+                )
         if self.import_from_browser is not None:
             # Import the submodule, NOT the package, to avoid a config ->
             # browser_import -> drivers.browser -> config import cycle.

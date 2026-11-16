@@ -45,6 +45,10 @@ from linkedin_mcp_server.exceptions import (
     CookieDecryptionError,
     NoLinkedInSessionFoundError,
 )
+from linkedin_mcp_server.process_tree import (
+    release_browser_guardian,
+    start_browser_guardian,
+)
 from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
 from linkedin_mcp_server.setup import UNGUARDED, a_peer_already_signed_in
 from linkedin_mcp_server.session_state import (
@@ -195,6 +199,7 @@ async def import_session_from_browser(
     *,
     user_data_dir: Path,
     superseded_by: str | None | object = UNGUARDED,
+    profile_wait_seconds: float = 0.0,
 ) -> bool:
     """Discover, rank, decrypt, validate and persist a browser LinkedIn session.
 
@@ -211,6 +216,10 @@ async def import_session_from_browser(
 
     Returns ``True`` on a validated, persisted session, ``False`` when a live
     ``li_at`` was found but no browser's session was accepted by LinkedIn.
+
+    *profile_wait_seconds* bounds a wait for the profile at the import's first
+    lease gate, for a caller that has asked a shared browser to retire and
+    expects it to let go. Every other caller demands the profile at once.
     """
     live, skipped = await asyncio.to_thread(_discover_and_rank, browser)
     if not live:
@@ -237,7 +246,16 @@ async def import_session_from_browser(
     # for the whole rotate-validate-commit flow. Without this another process
     # could launch against the profile the moment the staged cookies land.
     lease = get_profile_lease(user_data_dir)
-    if not lease.try_acquire():
+    # Waited for here and nowhere later: this is the reference the whole import
+    # holds, and the nested exclusivity check inside rotation only counts it
+    # again. A wait placed there would never be reached by an import refused
+    # here first.
+    held = (
+        await lease.acquire(timeout=profile_wait_seconds)
+        if profile_wait_seconds > 0
+        else lease.try_acquire()
+    )
+    if not held:
         raise BrowserBusyError(
             "Another LinkedIn MCP client is using the browser, so a session "
             "cannot be imported. Close it and try again."
@@ -281,6 +299,11 @@ async def _import_holding_the_profile(
     # every re-import from retiring the profile it replaces.
     retired = await rotate_shielded(user_data_dir)
 
+    # For the reason the login path starts one: validation launches Chromium
+    # through its own manager, so without a guardian a crash here would free the
+    # profile with that browser still running on it.
+    start_browser_guardian(lease.guardian_fd())
+
     imported = False
     shutdown_confirmed = True
     lease.mark_browser_open()
@@ -295,6 +318,11 @@ async def _import_holding_the_profile(
         raise
     finally:
         if shutdown_confirmed:
+            # For the reason the login releases here: one guardian exists per
+            # process, so keeping this one past a proved teardown would leave
+            # every later launch reusing a guardian whose descriptor no longer
+            # locks anything.
+            release_browser_guardian()
             lease.mark_browser_closed()
             # The retirement happens before a replacement exists, so an import
             # where every candidate is rejected — or that raises on

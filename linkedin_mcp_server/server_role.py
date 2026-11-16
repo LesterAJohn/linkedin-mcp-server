@@ -64,7 +64,7 @@ class ServerRole(enum.Enum):
 #: differently, and the only thing it can consult is the process it is.
 #:
 #: Deliberately not in ``AppConfig``. That is settings a user chose, and it
-#: travels to the owner over a pipe (``daemon_config``) carrying exactly the
+#: travels to the owner over a pipe (``daemon.config``) carrying exactly the
 #: fields both ends must agree on. The role is not one of them: an owner knows
 #: what it is, and being told by the frontend would be the wrong direction.
 #:
@@ -126,6 +126,7 @@ def process_role() -> ServerRole:
 #: directly, and direct HTTP server mode starts a small monitor so container
 #: restart policies can replace a process that cannot safely reuse its profile.
 _must_stand_down: list[str] = []
+_must_hard_exit = False
 
 
 def ask_this_process_to_stand_down(why: str) -> None:
@@ -146,6 +147,11 @@ def ask_this_process_to_stand_down(why: str) -> None:
 def stand_down_reason() -> str | None:
     """Why this process must exit, or ``None`` while it may keep serving."""
     return _must_stand_down[0] if _must_stand_down else None
+
+
+def hard_exit_required() -> bool:
+    """Whether normal shutdown would release locks before Chromium is gone."""
+    return _must_hard_exit
 
 
 def a_held_profile_means_this_owner_must_go(lease: Any | None = None) -> None:
@@ -185,8 +191,9 @@ def a_held_profile_means_this_owner_must_go(lease: Any | None = None) -> None:
     Never raises. The caller is mid-teardown or mid-failure and has its own
     exception to deliver.
     """
-    role = process_role()
-    if not role.drives_browser:
+    global _must_hard_exit
+
+    if process_role() is not ServerRole.OWNER:
         return
 
     try:
@@ -199,6 +206,7 @@ def a_held_profile_means_this_owner_must_go(lease: Any | None = None) -> None:
         held = True
     if not held:
         return
+    _must_hard_exit = True
     ask_this_process_to_stand_down(
         "the browser did not shut down cleanly, so the profile is held"
     )
@@ -210,6 +218,7 @@ def reset_process_role_for_testing() -> None:
     Without this an ``OWNER`` claimed by one test would refuse logins in every
     test after it, in a suite where most never mention a role at all.
     """
-    global _role
+    global _must_hard_exit, _role
     _role = None
     _must_stand_down.clear()
+    _must_hard_exit = False

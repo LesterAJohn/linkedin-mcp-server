@@ -12,14 +12,13 @@ import logging
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
-from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
-from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scraping.extractor import FilterValidationError
+from linkedin_mcp_server.dependencies import get_ready_extractor, tool_errors
+from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
+from linkedin_mcp_server.linkedin.contracts import FilterValidationError
+from linkedin_mcp_server.linkedin.search_urls import build_content_search_url
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +33,14 @@ def register_post_tools(
         title="Search Posts",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"post", "search"},
-        exclude_args=["extractor"],
     )
+    @tool_errors
     async def search_posts(
         keywords: str,
         ctx: Context,
         date_posted: str | None = None,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
-        extractor: Any | None = None,
+        content_type: str | None = None,
     ) -> dict[str, Any]:
         """
         Search LinkedIn posts/content globally by keyword (the "Posts" tab).
@@ -59,6 +58,9 @@ def register_post_tools(
                 "past-week", "past-month"; the "past_24_hours" / "past_week" /
                 "past_month" spellings used by search_jobs are accepted too.
                 Omit for any time.
+            content_type: Optional "Content type" filter. One of
+                "documents" (PDFs and slide decks people upload), "images",
+                "videos", "live_videos", "job_posts". Omit for all posts.
             max_pages: Scroll depth as result "pages" of ~5 scrolls each
                 (1-10, default 3). Content search is an infinite scroll, so
                 this caps how far the page is scrolled rather than fetching
@@ -66,51 +68,48 @@ def register_post_tools(
 
         Returns:
             Dict with url, sections (search_results -> raw text), and optional
-            references (post authors, companies, linked jobs) and
-            section_errors. The results page carries no per-post permalinks,
-            so reach a post through its author. The LLM should parse the raw
-            text to extract each post's author, headline/role, company, body,
-            posted date, and reaction/comment counts.
+            references (post authors, companies, linked jobs, and kind
+            "feed_post" permalinks read from the page's payload responses —
+            /feed/update/<urn>/ or /posts/<slug>, both valid permalinks) and
+            section_errors. The DOM carries no per-post permalink anchors;
+            captured permalinks are not aligned to result order. The LLM
+            should parse the raw text to extract each post's author,
+            headline/role, company, body, posted date, and reaction/comment
+            counts.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="search_posts"
+            # Refused before the browser, as in search_people.
+            build_content_search_url(
+                keywords, date_posted=date_posted, content_type=content_type
             )
-            logger.info(
-                "Searching posts: keywords='%s', date_posted='%s', max_pages=%d",
+        except FilterValidationError as e:
+            raise CodedToolError(str(e), ErrorCode.INVALID_ARGUMENT) from e
+
+        extractor = await get_ready_extractor(ctx, tool_name="search_posts")
+        logger.info(
+            "Searching posts: keywords='%s', date_posted='%s', content_type='%s', "
+            "max_pages=%d",
+            keywords,
+            date_posted,
+            content_type,
+            max_pages,
+        )
+
+        await ctx.report_progress(progress=0, total=100, message="Starting post search")
+
+        try:
+            result = await extractor.search_posts(
                 keywords,
-                date_posted,
-                max_pages,
+                date_posted=date_posted,
+                content_type=content_type,
+                max_pages=max_pages,
             )
+        except FilterValidationError as e:
+            # Validation messages carry actionable detail; surface them as
+            # ToolError so mask_error_details doesn't reduce them to a
+            # generic "Error calling tool 'search_posts'".
+            raise CodedToolError(str(e), ErrorCode.INVALID_ARGUMENT) from e
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Starting post search"
-            )
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            try:
-                result = await extractor.search_posts(
-                    keywords,
-                    date_posted=date_posted,
-                    max_pages=max_pages,
-                )
-            except FilterValidationError as e:
-                # Validation messages carry actionable detail; surface them as
-                # ToolError so mask_error_details doesn't reduce them to a
-                # generic "Error calling tool 'search_posts'".
-                raise ToolError(str(e)) from e
-
-            await ctx.report_progress(progress=100, total=100, message="Complete")
-
-            return result
-
-        except ToolError:
-            # Already a properly formatted client-facing error; do not log it
-            # as "Unexpected error" via raise_tool_error.
-            raise
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "search_posts")
-        except Exception as e:
-            raise_tool_error(e, "search_posts")  # NoReturn
+        return result

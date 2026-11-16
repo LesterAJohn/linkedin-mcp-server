@@ -1,4 +1,6 @@
-"""Core browser management, authentication, and scraping utilities."""
+"""Core browser management, authentication, and page-reading utilities."""
+
+from typing import TYPE_CHECKING
 
 from .auth import (
     detect_auth_barrier,
@@ -7,16 +9,18 @@ from .auth import (
     resolve_remember_me_prompt,
     wait_for_manual_login,
 )
-from .browser import BrowserManager
+from .destination import is_another_site, is_linkedin_landing, raise_if_off_linkedin
 from .exceptions import (
+    AccountRestrictedError,
     AuthenticationError,
     ElementNotFoundError,
-    LinkedInScraperException,
+    LinkedInOperationError,
     NetworkError,
+    OffLinkedInLandingError,
+    PageReadError,
     ProfileNotFoundError,
     ProxyConnectionError,
     RateLimitError,
-    ScrapingError,
 )
 from .proxy_errors import (
     as_proxy_error,
@@ -30,18 +34,40 @@ from .proxy_errors import (
 )
 from .utils import detect_rate_limit, handle_modal_close, scroll_to_bottom
 
+if TYPE_CHECKING:
+    from .browser import BrowserManager, await_deferring_cancels
+
+_LAZY_BROWSER_EXPORTS = frozenset({"BrowserManager", "await_deferring_cancels"})
+
+
+def __getattr__(name: str) -> object:
+    """Resolve browser lifecycle exports without loading them for leaf imports."""
+    if name not in _LAZY_BROWSER_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from importlib import import_module
+
+    browser = import_module(".browser", __name__)
+    value = getattr(browser, name)
+    globals()[name] = value
+    return value
+
+
 __all__ = [
+    "AccountRestrictedError",
     "AuthenticationError",
     "BrowserManager",
+    "await_deferring_cancels",
     "detect_auth_barrier",
     "detect_auth_barrier_quick",
     "ElementNotFoundError",
-    "LinkedInScraperException",
+    "LinkedInOperationError",
     "NetworkError",
+    "OffLinkedInLandingError",
+    "PageReadError",
     "ProfileNotFoundError",
     "ProxyConnectionError",
     "RateLimitError",
-    "ScrapingError",
     "as_proxy_error",
     "goto_reporting_proxy_errors",
     "is_proxy_error",
@@ -52,7 +78,10 @@ __all__ = [
     "redacted_copy",
     "detect_rate_limit",
     "handle_modal_close",
+    "is_another_site",
+    "is_linkedin_landing",
     "is_logged_in",
+    "raise_if_off_linkedin",
     "resolve_remember_me_prompt",
     "scroll_to_bottom",
     "wait_for_manual_login",

@@ -1,26 +1,27 @@
 """
-LinkedIn company profile scraping tools.
+LinkedIn company profile reading tools.
 
 Uses innerText extraction for resilient company data capture
 with configurable section selection.
 """
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
+from pydantic import Field
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
-from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scraping import parse_company_sections
-from linkedin_mcp_server.scraping.extractor import (
-    _RATE_LIMITED_MSG,
-    rate_limited_section_error,
+from linkedin_mcp_server.dependencies import get_ready_extractor, tool_errors
+from linkedin_mcp_server.linkedin import parse_company_sections
+from linkedin_mcp_server.linkedin.contracts import RATE_LIMITED_SECTION_TEXT
+from linkedin_mcp_server.linkedin.contracts import rate_limited_section_error
+from linkedin_mcp_server.linkedin.identifiers import (
+    company_page_url,
+    normalize_company_identifier,
 )
-from linkedin_mcp_server.scraping.link_metadata import Reference
+from linkedin_mcp_server.linkedin.link_metadata import Reference
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +35,13 @@ def register_company_tools(
         timeout=tool_timeout,
         title="Get Company Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
-        tags={"company", "scraping"},
-        exclude_args=["extractor"],
+        tags={"company"},
     )
+    @tool_errors
     async def get_company_profile(
         company_name: str,
         ctx: Context,
         sections: str | None = None,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Get a specific company's LinkedIn profile.
@@ -63,13 +63,13 @@ def register_company_tools(
         "sections": "posts,jobs"}.
 
         Args:
-            company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft")
+            company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft"). A full company URL is accepted too and is reduced to the slug.
             ctx: FastMCP context for progress reporting
-            sections: Comma-separated list of extra sections to scrape.
+            sections: Comma-separated list of extra sections to read.
                 The about page is always included.
                 Available sections: posts, jobs
                 Examples: "posts", "posts,jobs"
-                Default (None) scrapes only the about page.
+                Default (None) reads only the about page.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
@@ -84,47 +84,36 @@ def register_company_tools(
             URL facet; plain-text company names are silently ignored by
             that facet.
         """
-        try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_company_profile"
-            )
-            requested, unknown = parse_company_sections(sections)
+        # Validate before starting the browser; the reader normalizes the original reference.
+        normalize_company_identifier(company_name)
+        extractor = await get_ready_extractor(ctx, tool_name="get_company_profile")
+        requested, unknown = parse_company_sections(sections)
 
-            logger.info(
-                "Scraping company: %s (sections=%s)",
-                company_name,
-                sections,
-            )
+        logger.info(
+            "Reading company: %s (sections=%s)",
+            company_name,
+            sections,
+        )
 
-            cb = MCPContextProgressCallback(ctx)
-            result = await extractor.scrape_company(
-                company_name, requested, callbacks=cb
-            )
+        cb = MCPContextProgressCallback(ctx)
+        result = await extractor.read_company(company_name, requested, callbacks=cb)
 
-            if unknown:
-                result["unknown_sections"] = unknown
+        if unknown:
+            result["unknown_sections"] = unknown
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "get_company_profile")
-        except Exception as e:
-            raise_tool_error(e, "get_company_profile")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
         title="Get Company Posts",
         annotations={"readOnlyHint": True, "openWorldHint": True},
-        tags={"company", "scraping"},
-        exclude_args=["extractor"],
+        tags={"company"},
     )
+    @tool_errors
     async def get_company_posts(
         company_name: str,
         ctx: Context,
-        extractor: Any | None = None,
+        max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
     ) -> dict[str, Any]:
         """
         Get recent posts from a company's LinkedIn feed.
@@ -145,69 +134,62 @@ def register_company_tools(
         {"company_name": "microsoft"}.
 
         Args:
-            company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft")
+            company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft"). A full company URL is accepted too and is reduced to the slug.
             ctx: FastMCP context for progress reporting
+            max_scrolls: Maximum scroll-to-bottom iterations to load more posts.
+                Default (None) uses 10. Increase to read further back in the feed.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
             The LLM should parse the raw text to extract individual posts.
         """
-        try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_company_posts"
-            )
-            logger.info("Scraping company posts: %s", company_name)
+        company_name = normalize_company_identifier(company_name)
+        extractor = await get_ready_extractor(ctx, tool_name="get_company_posts")
+        logger.info("Reading company posts: %s", company_name)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Starting company posts scrape"
-            )
+        await ctx.report_progress(
+            progress=0, total=100, message="Reading company posts"
+        )
 
-            url = f"https://www.linkedin.com/company/{company_name}/posts/"
-            extracted = await extractor.extract_page(url, section_name="posts")
+        url = company_page_url(company_name, "/posts/")
+        extracted = await extractor.extract_page(
+            url, section_name="posts", max_scrolls=max_scrolls
+        )
 
-            sections: dict[str, str] = {}
-            references: dict[str, list[Reference]] = {}
-            section_errors: dict[str, dict[str, Any]] = {}
-            if extracted.text and extracted.text != _RATE_LIMITED_MSG:
-                sections["posts"] = extracted.text
-                if extracted.references:
-                    references["posts"] = extracted.references
-            elif extracted.text == _RATE_LIMITED_MSG:
-                section_errors["posts"] = rate_limited_section_error()
-            elif extracted.error:
-                section_errors["posts"] = extracted.error
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+        if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
+            sections["posts"] = extracted.text
+            if extracted.references:
+                references["posts"] = extracted.references
+        elif extracted.text == RATE_LIMITED_SECTION_TEXT:
+            section_errors["posts"] = rate_limited_section_error()
+        elif extracted.error:
+            section_errors["posts"] = extracted.error
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            result: dict[str, Any] = {
-                "url": url,
-                "sections": sections,
-            }
-            if references:
-                result["references"] = references
-            if section_errors:
-                result["section_errors"] = section_errors
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "get_company_posts")
-        except Exception as e:
-            raise_tool_error(e, "get_company_posts")  # NoReturn
+        result: dict[str, Any] = {
+            "url": url,
+            "sections": sections,
+        }
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
         title="Search Companies",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "search"},
-        exclude_args=["extractor"],
     )
+    @tool_errors
     async def search_companies(
         keywords: str,
         ctx: Context,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Search for companies on LinkedIn.
@@ -234,42 +216,30 @@ def register_company_tools(
             Dict with url, sections (search_results -> raw text), and optional references.
             The LLM should parse the raw text to extract individual companies and their pages.
         """
-        try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="search_companies"
-            )
-            logger.info("Searching companies: keywords='%s'", keywords)
+        extractor = await get_ready_extractor(ctx, tool_name="search_companies")
+        logger.info("Searching companies: keywords='%s'", keywords)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Starting company search"
-            )
+        await ctx.report_progress(
+            progress=0, total=100, message="Starting company search"
+        )
 
-            result = await extractor.search_companies(keywords)
+        result = await extractor.search_companies(keywords)
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "search_companies")
-        except Exception as e:
-            raise_tool_error(e, "search_companies")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
         title="Get Company Employees",
         annotations={"readOnlyHint": True, "openWorldHint": True},
-        tags={"company", "scraping"},
-        exclude_args=["extractor"],
+        tags={"company"},
     )
+    @tool_errors
     async def get_company_employees(
         company_name: str,
         ctx: Context,
         keywords: str | None = None,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         List employees at a company from the LinkedIn /people/ page, including
@@ -306,7 +276,7 @@ def register_company_tools(
         "keywords": "engineer"}.
 
         Args:
-            company_name: LinkedIn company URL slug (e.g., "docker", "anthropicresearch", "microsoft")
+            company_name: LinkedIn company URL slug (e.g., "docker", "anthropicresearch", "microsoft"). A full company URL is accepted too and is reduced to the slug.
             ctx: FastMCP context for progress reporting
             keywords: Optional filter by name, job title, or skill (e.g., "engineer", "sales")
 
@@ -314,30 +284,19 @@ def register_company_tools(
             Dict with url, sections (employees -> raw text), and optional references.
             References include /in/ profile paths for listed employees.
         """
-        try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_company_employees"
-            )
-            logger.info(
-                "Scraping company employees: %s (keywords=%s)", company_name, keywords
-            )
+        # Preserve the reference for the reader's single normalization pass.
+        normalize_company_identifier(company_name)
+        extractor = await get_ready_extractor(ctx, tool_name="get_company_employees")
+        logger.info(
+            "Reading company employees: %s (keywords=%s)", company_name, keywords
+        )
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Loading company employees"
-            )
+        await ctx.report_progress(
+            progress=0, total=100, message="Loading company employees"
+        )
 
-            result = await extractor.get_company_employees(
-                company_name, keywords=keywords
-            )
+        result = await extractor.get_company_employees(company_name, keywords=keywords)
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "get_company_employees")
-        except Exception as e:
-            raise_tool_error(e, "get_company_employees")  # NoReturn
+        return result
